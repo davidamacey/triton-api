@@ -1,0 +1,47 @@
+version: '3'
+
+services:
+  triton-api:
+    image: nvcr.io/nvidia/tritonserver:24.11-py3
+    pull_policy: always
+    container_name: triton-api
+    restart: always
+    ports:
+      - 8010:8000
+      - 8001:8001
+      - 8002:8002
+    volumes:
+      - ./models:/models
+    command: [ "tritonserver", "--model-store=/models", "--backend-config=default-max-batch-size=50", "--strict-model-config=false" ]
+    shm_size: 2g
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '1' ]
+              capabilities:
+                - gpu
+    networks:
+      - triton_net
+
+  yolo-api:
+    container_name: yolo-api
+    pull_policy: always
+    build: .
+    volumes:
+      - ./src:/app/src # code base
+    stdin_open: true # Keep stdin open
+    tty: true # Allocate a pseudo-TTY
+    # command: "python3"
+    ports:
+      - 8200:8200
+    networks:
+      - triton_net
+
+networks:
+  triton_net:
+    driver: bridge
