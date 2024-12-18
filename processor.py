@@ -53,7 +53,7 @@ async def process_image(session, file_path, target_size=640):
         # Prepare payload with additional parameters
         payload = aiohttp.FormData()
         payload.add_field('image', img_encoded.tobytes(), filename=os.path.basename(file_path), content_type='image/jpeg')
-        # payload.add_field('model_name', str('nano'))
+        payload.add_field('model_name', str('small'))
 
         # Send image to FastAPI endpoint
         async with session.post(FASTAPI_URL, data=payload) as response:

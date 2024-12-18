@@ -47,7 +47,7 @@ async def predict(
     if model_name not in MODEL_ENDPOINTS:
         raise HTTPException(status_code=400, detail="Invalid model name.")
     
-    model = YOLO("http://triton-api:8000/yolov11_nano", task="detect")
+    model = MODEL_ENDPOINTS[model_name]
 
     try:
         # Read and decode the image
