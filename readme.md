@@ -8,7 +8,13 @@ Using the export script to get the onnx model to load into the model registry
 
 ## Deploy Triton with Ultralytics FastAPI
 
-`docker compose up -d`
+```bash
+docker compose up -d
+```
+
+## Scripts
+
+Included are various python scripts to test inference on single, multiple, and batch instances for testing.
 
 ## Use Triton
 
