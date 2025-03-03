@@ -31,6 +31,7 @@ services:
   yolo-api:
     container_name: yolo-api
     pull_policy: always
+    restart: always
     build: .
     volumes:
       - ./src:/app/src # code base
