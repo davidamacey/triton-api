@@ -1,0 +1,94 @@
+groups:
+  - name: triton_inference_alerts
+    interval: 30s
+    rules:
+      # High latency alert
+      - alert: HighInferenceLatency
+        expr: |
+          (rate(nv_inference_compute_infer_duration_us[5m]) / rate(nv_inference_request_success[5m])) > 100000
+        for: 2m
+        labels:
+          severity: warning
+          component: triton
+        annotations:
+          summary: "High inference latency detected on {{ $labels.model }}"
+          description: "Model {{ $labels.model }} version {{ $labels.version }} has average latency {{ $value | humanize }}µs (threshold: 100ms)"
+
+      # Critical latency alert
+      - alert: CriticalInferenceLatency
+        expr: |
+          (rate(nv_inference_compute_infer_duration_us[5m]) / rate(nv_inference_request_success[5m])) > 500000
+        for: 1m
+        labels:
+          severity: critical
+          component: triton
+        annotations:
+          summary: "CRITICAL: Very high inference latency on {{ $labels.model }}"
+          description: "Model {{ $labels.model }} latency is {{ $value | humanize }}µs - immediate attention required"
+
+      # High failure rate
+      - alert: HighInferenceFailureRate
+        expr: |
+          (rate(nv_inference_request_failure[5m]) / (rate(nv_inference_request_success[5m]) + rate(nv_inference_request_failure[5m]))) > 0.01
+        for: 2m
+        labels:
+          severity: warning
+          component: triton
+        annotations:
+          summary: "High failure rate on {{ $labels.model }}"
+          description: "Model {{ $labels.model }} has {{ $value | humanizePercentage }} failure rate"
+
+      # Model not ready
+      - alert: ModelNotReady
+        expr: nv_model_ready_state == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: triton
+        annotations:
+          summary: "Model {{ $labels.model }} is not ready"
+          description: "Model {{ $labels.model }} version {{ $labels.version }} has been in not-ready state for over 1 minute"
+
+      # High GPU utilization
+      - alert: HighGPUUtilization
+        expr: nv_gpu_utilization > 95
+        for: 5m
+        labels:
+          severity: warning
+          component: gpu
+        annotations:
+          summary: "High GPU utilization detected"
+          description: "GPU {{ $labels.gpu_uuid }} utilization is {{ $value }}% for over 5 minutes"
+
+      # GPU memory pressure
+      - alert: HighGPUMemoryUsage
+        expr: (nv_gpu_memory_used_bytes / nv_gpu_memory_total_bytes) > 0.90
+        for: 5m
+        labels:
+          severity: warning
+          component: gpu
+        annotations:
+          summary: "High GPU memory usage"
+          description: "GPU {{ $labels.gpu_uuid }} memory usage is {{ $value | humanizePercentage }}"
+
+      # Queue buildup
+      - alert: HighQueueDepth
+        expr: nv_inference_pending_request_count > 50
+        for: 2m
+        labels:
+          severity: warning
+          component: triton
+        annotations:
+          summary: "High request queue depth on {{ $labels.model }}"
+          description: "Model {{ $labels.model }} has {{ $value }} pending requests - consider scaling"
+
+      # Triton server down
+      - alert: TritonServerDown
+        expr: up{job="triton"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: triton
+        annotations:
+          summary: "Triton server is down"
+          description: "Triton inference server is not responding to health checks"

@@ -1,19 +1,48 @@
-version: '3'
-
 services:
   triton-api:
-    image: nvcr.io/nvidia/tritonserver:24.11-py3
+    image: nvcr.io/nvidia/tritonserver:25.10-py3
     pull_policy: always
     container_name: triton-api
     restart: always
     ports:
-      - 8010:8000
-      - 8001:8001
-      - 8002:8002
+      - 9500:8000
+      - 9501:8001
+      - 9502:8002
     volumes:
       - ./models:/models
-    command: [ "tritonserver", "--model-store=/models", "--backend-config=default-max-batch-size=50", "--strict-model-config=false" ]
-    shm_size: 2g
+    command:
+      - tritonserver
+      - --model-store=/models
+      - --backend-config=default-max-batch-size=128
+      - --strict-model-config=false
+      - --model-control-mode=explicit
+      # ===================================================================
+      # TRACK D ONLY - Maximum Performance Focus
+      # ===================================================================
+      # Track A (PyTorch): Disabled in yolo-api
+      # Track B (Standard TRT): Commented out below
+      # Track C (End2End TRT): Commented out below
+      # Track D (DALI + TRT End2End): ENABLED with increased instances
+      # ===================================================================
+      # Track B: Standard TRT with CPU NMS (DISABLED)
+      # - --load-model=yolov11_small_trt
+      # Track C: End2End TRT with GPU NMS, CPU preprocessing (DISABLED)
+      # - --load-model=yolov11_small_trt_end2end
+      # Track D Components: DALI + TRT End2End (Full GPU Pipeline)
+      - --load-model=yolo_preprocess_dali_batch         # DALI batch preprocessing
+      - --load-model=yolo_preprocess_dali               # DALI balanced preprocessing
+      - --load-model=yolo_preprocess_dali_streaming     # DALI streaming preprocessing
+      - --load-model=yolov11_small_trt_end2end_batch    # TRT End2End for batch
+      - --load-model=yolov11_small_trt_end2end          # TRT End2End for balanced
+      - --load-model=yolov11_small_trt_end2end_streaming # TRT End2End for streaming
+      # Track D Ensembles: Three performance tiers (CPU affine matrix calculation)
+      - --load-model=yolov11_small_gpu_e2e_streaming    # Low latency (video streaming)
+      - --load-model=yolov11_small_gpu_e2e              # Balanced (general purpose)
+      - --load-model=yolov11_small_gpu_e2e_batch        # High throughput (batch processing)
+      # ===================================================================
+      - --log-verbose=1
+      - --log-info=true
+    shm_size: 8g
     ulimits:
       memlock: -1
       stack: 67108864
@@ -22,7 +51,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: [ '1' ]
+              device_ids: [ '0', '2' ]  # Both A6000 GPUs (GPU 0 + GPU 2) for parallel processing
               capabilities:
                 - gpu
     networks:
@@ -32,17 +61,169 @@ services:
     container_name: yolo-api
     pull_policy: always
     restart: always
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     volumes:
-      - ./src:/app/src # code base
+      - ./src:/app/src
+      - ./export:/app/export
+      - ./dali:/app/dali
+      - ./scripts:/app/scripts
+      - ./tests:/app/tests
+      - ./benchmarks:/app/benchmarks
+      - ./models:/app/models
+      - ./pytorch_models:/app/pytorch_models
+      - ./test_images:/app/test_images
+    shm_size: 8g
     stdin_open: true # Keep stdin open
     tty: true # Allocate a pseudo-TTY
-    # command: "python3"
+    command:
+      - uvicorn
+      - src.main:app
+      - --host=0.0.0.0
+      - --port=9600
+      # ===================================================================
+      # Worker Configuration (Performance Tuning)
+      # Recommended: (2 × CPU cores) + 1
+      # Dual-GPU: Increased to 64 workers to feed both GPUs (2x previous)
+      # Adjust based on: CPU cores, memory, and GPU contention
+      # ===================================================================
+      - --workers=64
+      - --limit-max-requests=10000       # Recycle workers every 10k requests (prevents memory leaks)
+      # ===================================================================
+      # Event Loop & HTTP Protocol (Already Optimized)
+      # ===================================================================
+      - --loop=uvloop                    # 2-3x faster than asyncio default loop
+      - --http=httptools                 # Faster HTTP parsing than h11
+      # ===================================================================
+      # Connection & Concurrency Settings
+      # ===================================================================
+      - --backlog=4096                   # Socket connection queue size
+      - --limit-concurrency=512          # Max concurrent requests (prevents overload)
+      - --timeout-keep-alive=75          # Keep connections alive for reuse
+      - --timeout-graceful-shutdown=30   # Clean shutdown (drain connections)
+      # ===================================================================
+      # Logging
+      # ===================================================================
+      - --access-log
+      - --log-level=info
     ports:
-      - 8200:8200
+      - 9600:9600
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '0' ]
+              capabilities:
+                - gpu
+    depends_on:
+      - triton-api
     networks:
       - triton_net
+
+  triton-sdk:
+    image: nvcr.io/nvidia/tritonserver:25.10-py3-sdk
+    container_name: triton-sdk
+    profiles:
+      - benchmark
+    command: sleep infinity
+    volumes:
+      - ./benchmarks:/workspace/benchmarks
+      - ./models:/models
+    networks:
+      - triton_net
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: triton-node-exporter
+    restart: always
+    command:
+      - '--path.rootfs=/host'
+    pid: host
+    volumes:
+      - '/:/host:ro,rslave'
+    networks:
+      - triton_net
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: triton-prometheus
+    restart: always
+    ports:
+      - 9090:9090
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring/alerts:/etc/prometheus/alerts
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - triton_net
+    depends_on:
+      - triton-api
+      - node-exporter
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: triton-grafana
+    restart: always
+    ports:
+      - 3000:3000
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+      - ./monitoring/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml
+      - ./monitoring/dashboards:/etc/grafana/dashboards
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - triton_net
+    depends_on:
+      - prometheus
+      - loki
+
+  loki:
+    image: grafana/loki:latest
+    container_name: triton-loki
+    restart: always
+    user: "0"  # Run as root to avoid permission issues
+    ports:
+      - 3100:3100
+    volumes:
+      - ./monitoring/loki-config.yml:/etc/loki/local-config.yaml
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - triton_net
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: triton-promtail
+    restart: always
+    volumes:
+      - ./monitoring/promtail-config.yml:/etc/promtail/config.yml
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - triton_net
+    depends_on:
+      - loki
 
 networks:
   triton_net:
     driver: bridge
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  loki_data:

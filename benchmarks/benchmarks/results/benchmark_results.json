@@ -1,0 +1,21 @@
+{
+  "results": [
+    {
+      "track_id": "D_batch",
+      "track_name": "DALI+TRT Batch",
+      "test_mode": "all_images_concurrent",
+      "total_requests": 1138,
+      "success_requests": 1138,
+      "failed_requests": 0,
+      "total_duration_sec": 5.626094015,
+      "throughput_rps": 202.27177095973218,
+      "mean_latency_ms": 1086.6754574173995,
+      "median_latency_ms": 1114.608818,
+      "p95_latency_ms": 1565.9111250999997,
+      "p99_latency_ms": 1925.291019989997,
+      "min_latency_ms": 225.40864299999998,
+      "max_latency_ms": 2241.892827
+    }
+  ],
+  "timestamp": "2025-11-22T15:59:46-05:00"
+}

@@ -1,0 +1,103 @@
+# YOLOV11_SMALL_GPU_E2E_BATCH - Track D Ensemble
+# ======================================================================
+# Offline batch processing (optimized for throughput)
+#
+# Pipeline:
+#   1. DALI preprocessing (GPU: decode + letterbox + normalize)
+#   2. YOLO TRT End2End (GPU: inference + NMS)
+#
+# Configuration tier: batch
+# - Max batch: 64 (limited by TRT End2End model)
+# - Batching window: 5.0ms
+# - Preserve ordering: false
+# - Instance count: 1
+
+name: "yolov11_small_gpu_e2e_batch"
+platform: "ensemble"
+max_batch_size: 64
+
+# Input: Raw JPEG/PNG bytes + affine transformation matrices
+input [
+  {
+    name: "encoded_images"
+    data_type: TYPE_UINT8
+    dims: [ -1 ]  # Variable-length byte array
+  },
+  {
+    name: "affine_matrices"
+    data_type: TYPE_FP32
+    dims: [ 2, 3 ]  # 2x3 affine transformation matrix per image
+  }
+]
+
+# Output: Final detections (after GPU NMS)
+output [
+  {
+    name: "num_dets"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "det_boxes"
+    data_type: TYPE_FP32
+    dims: [ 100, 4 ]  # [x, y, w, h] format
+  },
+  {
+    name: "det_scores"
+    data_type: TYPE_FP32
+    dims: [ 100 ]
+  },
+  {
+    name: "det_classes"
+    data_type: TYPE_INT32
+    dims: [ 100 ]
+  }
+]
+
+# Ensemble: DALI → YOLO TRT End2End
+ensemble_scheduling {
+  step [
+    {
+      # Step 1: DALI preprocessing (GPU decode + letterbox + normalize)
+      model_name: "yolo_preprocess_dali_batch"
+      model_version: -1
+      input_map {
+        key: "encoded_images"
+        value: "encoded_images"
+      }
+      input_map {
+        key: "affine_matrices"
+        value: "affine_matrices"
+      }
+      output_map {
+        key: "preprocessed_images"
+        value: "preprocessed_images"
+      }
+    },
+    {
+      # Step 2: YOLO TRT End2End (GPU inference + NMS)
+      model_name: "yolov11_small_trt_end2end_batch"
+      model_version: -1
+      input_map {
+        key: "images"
+        value: "preprocessed_images"
+      }
+      output_map {
+        key: "num_dets"
+        value: "num_dets"
+      }
+      output_map {
+        key: "det_boxes"
+        value: "det_boxes"
+      }
+      output_map {
+        key: "det_scores"
+        value: "det_scores"
+      }
+      output_map {
+        key: "det_classes"
+        value: "det_classes"
+      }
+    }
+  ]
+}

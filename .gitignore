@@ -1,7 +1,108 @@
-.uenv/
+# ============================================================================
+# Triton YOLO Inference Server - .gitignore
+# ============================================================================
+
+# ============================================================================
+# Project-Specific (Triton + YOLO)
+# ============================================================================
+
+# TensorRT engines and caches
 *.engine
+*.plan
 *.profile
+trt_cache/
+models/*/1/*.plan
+models/*/1/*.engine
+
+# Model weights (large files - download locally)
+*.pt
+*.onnx
+*.safetensors
+*.weights
+*.pth
+
+# DALI pipeline files (generated, can be recreated via scripts)
+models/*/1/*.dali
+
+# Triton model repository dynamic files
+models/*/1/warmup/
+
+# PyTorch models (download via scripts)
+pytorch_models/*.pt
+pytorch_models/*.onnx
+
+# Ultralytics cache and runs
+.ultralytics/
+runs/
+yolov*[0-9]/  # Matches yolov8/, yolov11/ etc. but not yolov11_small_trt/
+
+# ============================================================================
+# Benchmark and Test Results
+# ============================================================================
+
+# Go compiled binary (rebuilt via build.sh)
+benchmarks/triton_bench
+
+# Benchmark results (auto-generated)
+benchmarks/results/*.json
+benchmarks/results/*.csv
+benchmarks/results/*.png
+benchmarks/results/*.html
+benchmarks/results/*.txt
+
+# Load test results
+load_test_results/
+locust_*.html
+locust_*.csv
+
+# ============================================================================
+# Test Data and Samples
+# ============================================================================
+
+# Test images and videos (use external paths or download separately)
+test_images/
+test_videos/
+sample_data/
 IMGS_TEST/
+/KILLBOY_SAMPLE_PICTURES/
+
+# ============================================================================
+# Reference Repositories (External Code for Research)
+# ============================================================================
+
+# External repos cloned for reference (36MB - not needed in version control)
+reference_repos/
+
+# ============================================================================
+# Monitoring and Logs
+# ============================================================================
+
+# Grafana data and dashboards (runtime generated)
+monitoring/grafana/data/
+monitoring/prometheus/data/
+
+# Application logs
+*.log
+logs/
+*.log.*
+
+# ============================================================================
+# Docker and Deployment
+# ============================================================================
+
+# Docker compose overrides (environment-specific)
+docker-compose.override.yml
+docker-compose.*.yml
+!docker-compose.yml
+
+# Environment files (secrets)
+.env
+.env.local
+.env.*.local
+
+# ============================================================================
+# Python
+# ============================================================================
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -32,8 +133,6 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
 
@@ -60,26 +159,6 @@ cover/
 *.mo
 *.pot
 
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
 # Jupyter Notebook
 .ipynb_checkpoints
 
@@ -87,52 +166,7 @@ target/
 profile_default/
 ipython_config.py
 
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#uv.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
-
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#pdm.lock
-#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
-#   in version control.
-#   https://pdm.fming.dev/latest/usage/project/#working-with-version-control
-.pdm.toml
-.pdm-python
-.pdm-build/
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
+# Virtual environments
 .env
 .venv
 env/
@@ -140,16 +174,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
+.uenv/
 
 # mypy
 .mypy_cache/
@@ -165,9 +190,130 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-# PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
+# ============================================================================
+# IDE and Editors
+# ============================================================================
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+*.iws
+
+# Vim
+*.swp
+*.swo
+*~
+.*.swp
+.*.swo
+
+# Emacs
+\#*\#
+.\#*
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# ============================================================================
+# Operating System
+# ============================================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+.Trash-*
+
+# ============================================================================
+# Temporary and Backup Files
+# ============================================================================
+
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+*.rej
+*.swp
+*~
+.*.swp
+
+# ============================================================================
+# Git and Version Control
+# ============================================================================
+
+# Git conflict markers
+*.BACKUP.*
+*.BASE.*
+*.LOCAL.*
+*.REMOTE.*
+*_BACKUP_*.txt
+*_BASE_*.txt
+*_LOCAL_*.txt
+*_REMOTE_*.txt
+
+# ============================================================================
+# Project-Specific Temporary Files
+# ============================================================================
+
+# Old markdown docs (removed during cleanup)
+BATCHING_SOLUTIONS.md
+IMPLEMENTATION_SUMMARY.md
+PERFORMANCE_COMPARISON.md
+READY_TO_TEST.md
+FILES_CHANGED.txt
+
+# Backup folders (git history is sufficient)
+backups/
+
+# ============================================================================
+# Security and Credentials
+# ============================================================================
+
+# Never commit credentials
+*.pem
+*.key
+*.crt
+*.cert
+credentials.json
+secrets.yaml
+secrets.yml
+
+# ============================================================================
+# Notes
+# ============================================================================
+#
+# Files INTENTIONALLY COMMITTED:
+# - models/*/config.pbtxt (Triton model configs)
+# - models/*/labels.txt (Class labels)
+# - benchmarks/*.go (Benchmark source code)
+# - benchmarks/build.sh (Build script)
+# - CLAUDE.md (Project instructions)
+# - ATTRIBUTION.md (License compliance)
+# - AUTOMATION.md (Automation guide)
+# - README.md (Main documentation)
+# - docs/**/*.md (All documentation)
+#
+# Files to GENERATE LOCALLY:
+# - DALI pipelines: python dali/create_dali_letterbox_pipeline.py
+# - TensorRT engines: python export/export_models.py
+# - PyTorch models: bash export/download_pytorch_models.sh
+# - Test images: Add your own to test_images/ (ignored)
+#
+# ============================================================================

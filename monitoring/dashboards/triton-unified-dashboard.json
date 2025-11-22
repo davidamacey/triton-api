@@ -1,0 +1,1768 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": "Prometheus",
+      "description": "Shows whether all models are loaded and ready to serve requests",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "text": "NOT READY",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "READY",
+                  "color": "green"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "none"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "text": {}
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "expr": "min(nv_model_ready_state)",
+          "legendFormat": "All Models",
+          "refId": "A"
+        }
+      ],
+      "title": "Model Ready",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Total inference requests per second across all models",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
+            ]
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "text": {}
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(nv_inference_request_success{model=~\"yolov11.*\"}[1m]))",
+          "refId": "A"
+        }
+      ],
+      "title": "Throughput",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Average inference latency across all models",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          },
+          "unit": "ms"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "text": {}
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(nv_inference_compute_infer_duration_us{model=~\"yolov11.*\"}[1m])) / sum(rate(nv_inference_request_success{model=~\"yolov11.*\"}[1m])) / 1000",
+          "refId": "A"
+        }
+      ],
+      "title": "Avg Latency",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Average queue wait time in microseconds",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50000
+              },
+              {
+                "color": "red",
+                "value": 100000
+              }
+            ]
+          },
+          "unit": "µs"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "id": 17,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "text": {}
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(nv_inference_queue_duration_us{model=~\"yolov11.*\"}[1m])) / sum(rate(nv_inference_request_success{model=~\"yolov11.*\"}[1m]))",
+          "refId": "A"
+        }
+      ],
+      "title": "Queue Time",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Total number of pending requests across all models",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "id": 18,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "text": {}
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "expr": "sum(nv_inference_pending_request_count{model=~\"yolov11.*\"})",
+          "refId": "A"
+        }
+      ],
+      "title": "Pending Reqs",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Current GPU utilization percentage",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
+          "unit": "percent"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "text": {}
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "expr": "avg(nv_gpu_utilization) * 100",
+          "refId": "A"
+        }
+      ],
+      "title": "GPU Usage",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Overall system CPU utilization percentage",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
+          "unit": "percent"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 5
+      },
+      "id": 19,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "text": {}
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "expr": "(1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[1m]))) * 100",
+          "refId": "A"
+        }
+      ],
+      "title": "System CPU Usage",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "System memory utilization percentage",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          },
+          "unit": "percent"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 5
+      },
+      "id": 20,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "text": {}
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+          "refId": "A"
+        }
+      ],
+      "title": "System Memory Usage",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "System load average (1min, 5min, 15min)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 8
+              },
+              {
+                "color": "red",
+                "value": 16
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 5
+      },
+      "id": 21,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "text": {}
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "expr": "node_load1",
+          "refId": "A"
+        }
+      ],
+      "title": "System Load (1m)",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Number of CPU cores available",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 5
+      },
+      "id": 22,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": false,
+        "text": {}
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "expr": "count(count(node_cpu_seconds_total{mode=\"idle\"}) by (cpu))",
+          "refId": "A"
+        }
+      ],
+      "title": "CPU Cores",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Requests per second by model track - shows comparative throughput performance",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Requests/sec",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(nv_inference_request_success{model=~\"yolov11.*\"}[1m])",
+          "legendFormat": "{{model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Model Track Throughput Comparison",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Latency comparison across model tracks - shows Avg, P95, and P99 percentiles",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Latency (ms)",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          },
+          "unit": "ms"
+        }
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max",
+            "min"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "asc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(nv_inference_compute_infer_duration_us{model=~\"yolov11.*\"}[1m]) / rate(nv_inference_request_success{model=~\"yolov11.*\"}[1m]) / 1000",
+          "legendFormat": "{{model}} - Avg",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(nv_inference_request_duration_us_bucket{model=~\"yolov11.*\"}[1m])) / 1000",
+          "legendFormat": "{{model}} - P95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(nv_inference_request_duration_us_bucket{model=~\"yolov11.*\"}[1m])) / 1000",
+          "legendFormat": "{{model}} - P99",
+          "refId": "C"
+        }
+      ],
+      "title": "Model Track Latency Comparison (Avg, P95, P99)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Performance leaderboard - lower latency is better",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "max": 200,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          },
+          "unit": "ms"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "id": 7,
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showUnfilled": true
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "expr": "rate(nv_inference_compute_infer_duration_us{model=~\"yolov11.*\"}[5m]) / rate(nv_inference_request_success{model=~\"yolov11.*\"}[5m]) / 1000",
+          "legendFormat": "{{model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Model Track Performance Leaderboard (Lower is Better)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Average batch size achieved by dynamic batching per model",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Batch Size",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(nv_inference_request_success{model=~\"yolov11.*\"}[1m]) / rate(nv_inference_exec_count{model=~\"yolov11.*\"}[1m])",
+          "legendFormat": "{{model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Average Batch Size by Model Track",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "DALI preprocessing batch size - low values indicate a bottleneck",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Batch Size",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 4
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max",
+            "min"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(nv_inference_request_success{model=~\"yolo_preprocess_dali.*\"}[1m]) / rate(nv_inference_exec_count{model=~\"yolo_preprocess_dali.*\"}[1m])",
+          "legendFormat": "{{model}} (DALI)",
+          "refId": "A"
+        }
+      ],
+      "title": "DALI Preprocessing Batch Size (BOTTLENECK INDICATOR)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Time requests spend waiting in queue before inference",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Time (µs)",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "µs"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "asc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(nv_inference_queue_duration_us{model=~\"yolov11.*\"}[1m]) / rate(nv_inference_request_success{model=~\"yolov11.*\"}[1m])",
+          "legendFormat": "{{model}} - Queue",
+          "refId": "A"
+        }
+      ],
+      "title": "Queue Time Comparison",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Number of requests currently waiting in queue per model",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "nv_inference_pending_request_count{model=~\"yolov11.*\"}",
+          "legendFormat": "{{model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Pending Requests by Model Track",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Failed inference requests per second by model and reason",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(nv_inference_request_failure{model=~\"yolov11.*\"}[5m])",
+          "legendFormat": "{{model}} - {{reason}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Failed Requests by Model Track",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "GPU utilization percentage - shows compute load",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percent"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 60
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "nv_gpu_utilization * 100",
+          "legendFormat": "GPU {{gpu_uuid}}",
+          "refId": "A"
+        }
+      ],
+      "title": "GPU Utilization",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "GPU memory usage - shows used vs total memory",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 60
+      },
+      "id": 14,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "nv_gpu_memory_used_bytes",
+          "legendFormat": "GPU {{gpu_uuid}} - Used",
+          "refId": "A"
+        },
+        {
+          "expr": "nv_gpu_memory_total_bytes",
+          "legendFormat": "GPU {{gpu_uuid}} - Total",
+          "refId": "B"
+        }
+      ],
+      "title": "GPU Memory Usage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "GPU power consumption in watts",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "watt"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 68
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "nv_gpu_power_usage",
+          "legendFormat": "GPU {{gpu_uuid}}",
+          "refId": "A"
+        }
+      ],
+      "title": "GPU Power Usage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "GPU temperature in Celsius",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          },
+          "unit": "celsius"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 68
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "nv_gpu_temperature",
+          "legendFormat": "GPU {{gpu_uuid}}",
+          "refId": "A"
+        }
+      ],
+      "title": "GPU Temperature",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "CPU utilization by mode - shows breakdown of CPU usage",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 30,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "percent"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 76
+      },
+      "id": 23,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "avg by (mode) (rate(node_cpu_seconds_total[1m]))",
+          "legendFormat": "{{mode}}",
+          "refId": "A"
+        }
+      ],
+      "title": "CPU Utilization by Mode",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "System memory breakdown - used, cached, buffered, and free",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 76
+      },
+      "id": 24,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
+          "legendFormat": "Used",
+          "refId": "A"
+        },
+        {
+          "expr": "node_memory_Cached_bytes",
+          "legendFormat": "Cached",
+          "refId": "B"
+        },
+        {
+          "expr": "node_memory_Buffers_bytes",
+          "legendFormat": "Buffers",
+          "refId": "C"
+        },
+        {
+          "expr": "node_memory_MemAvailable_bytes",
+          "legendFormat": "Available",
+          "refId": "D"
+        }
+      ],
+      "title": "System Memory Breakdown",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": [
+    "triton",
+    "yolo",
+    "unified"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "YOLO Triton Unified Dashboard",
+  "uid": "yolo-triton-unified",
+  "version": 0
+}

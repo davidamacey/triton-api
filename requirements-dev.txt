@@ -1,0 +1,39 @@
+# Host Machine Requirements for Testing Containerized Services
+# Install with: pip install -r requirements-dev.txt
+#
+# NOTE: This is ONLY for the host machine to test the containerized FastAPI endpoints.
+# The containers have their own dependencies (ultralytics, torch, etc.) defined in requirements.txt
+#
+# Architecture:
+# - Track A (port 9600): FastAPI → Ultralytics YOLO → Triton (TensorRT)
+# - Track B (port 9700): FastAPI → Ultralytics YOLO → PyTorch
+# - Host: Load testing client that sends images to the endpoints via HTTP
+
+# HTTP client for sending requests to FastAPI endpoints
+requests>=2.32.0
+aiohttp>=3.9.0
+
+# Load testing framework (sends concurrent requests)
+locust>=2.31.0
+
+# Data analysis and visualization (for benchmark results)
+pandas>=2.2.0
+numpy>=1.26.0
+matplotlib>=3.9.0
+
+# Image handling (for client-side image manipulation if needed)
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# ONNX Runtime for local model testing (requires >=1.19 for IR version 12)
+onnxruntime>=1.19.0
+
+# Benchmark result formatting
+tabulate>=0.9.0
+
+# Performance profiling tools
+py-spy>=0.3.14  # CPU profiler with flamegraph visualization (use inside container)
+
+# Optional development tools (linting, formatting)
+# black>=24.0.0
+# ruff>=0.6.0

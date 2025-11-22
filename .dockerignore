@@ -1,5 +1,76 @@
+# Virtual environments
 .uenv/
+.venv/
+venv/
+env/
+
+# Models (mounted as volumes)
 models/
 *.pt
 *.onnx
 *.pbtxt
+*.plan
+*.engine
+
+# TensorRT cache (mounted as volume)
+trt_cache/
+
+# Documentation (not needed in containers)
+docs/
+*.md
+!requirements.txt
+CLAUDE.md
+
+# Benchmarks (run from host)
+benchmarks/results/
+*.json
+*.csv
+
+# Test data (use external mounts)
+test_images/
+test_videos/
+sample_data/
+
+# Legacy scripts (deprecated)
+scripts/legacy/
+
+# Git files
+.git/
+.gitignore
+.gitattributes
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+
+# CI/CD
+.github/
+.gitlab-ci.yml
