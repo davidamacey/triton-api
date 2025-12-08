@@ -1,30 +1,49 @@
-# YOLO Model Export Scripts
+# Model Export Scripts
 
-This folder contains scripts for downloading and exporting YOLO models in multiple formats optimized for NVIDIA Triton Inference Server deployment.
+This folder contains scripts for downloading and exporting models in multiple formats optimized for NVIDIA Triton Inference Server deployment.
 
 ## Overview
 
-The export process transforms PyTorch YOLO models (`.pt` files) into optimized formats for GPU inference. This repository supports **four performance tracks** (A/B/C/D) with increasing optimization levels:
+The export process transforms PyTorch models into optimized formats for GPU inference. This repository supports **five performance tracks**:
+
+### YOLO Detection Tracks (A/B/C/D)
 
 | Track | Format | Preprocessing | NMS | Performance |
 |-------|--------|---------------|-----|-------------|
-| **A** | ONNX | CPU | CPU | Baseline |
+| **A** | PyTorch (.pt) | CPU | CPU | Baseline |
 | **B** | TensorRT | CPU | CPU | 2x faster |
 | **C** | TRT End2End | CPU | GPU | 4x faster |
 | **D** | DALI + TRT End2End | GPU | GPU | 10-15x faster |
 
-This folder handles **Tracks A, B, and C**. Track D (DALI preprocessing) is managed in the [dali](../dali/) folder.
+This folder handles **Tracks B and C** exports. Track A uses PyTorch models directly (no export needed). Track D (DALI preprocessing) is managed in the [dali](../dali/) folder.
+
+### Track E: Visual Search with MobileCLIP
+
+| Component | Format | Input | Output | Use Case |
+|-----------|--------|-------|--------|----------|
+| **Image Encoder** | TensorRT | 256x256 images | 512-dim embeddings | Image-to-image search |
+| **Text Encoder** | TensorRT | 77 tokens | 512-dim embeddings | Text-to-image search |
+
+Track E exports are managed in this folder using MobileCLIP2-S2 (recommended) or MobileCLIP2-B (higher accuracy).
 
 ## Architecture
 
-### Export Pipeline
+### YOLO Export Pipeline
 
 ```
 PyTorch Model (.pt)
-    ├─→ [1] Standard ONNX → Track A
-    ├─→ [2] TensorRT Engine (from ONNX) → Track B
-    ├─→ [3] ONNX End2End (with NMS operators) → Track C (intermediate)
-    └─→ [4] TRT End2End (compiled NMS) → Track C (final)
+    ├─→ [Track A] Used directly (no export needed)
+    ├─→ [Track B] TensorRT Engine (from ONNX)
+    ├─→ [Track C] ONNX End2End (with NMS operators) → TRT End2End (compiled NMS)
+    └─→ [Track D] Uses Track C TRT End2End + DALI preprocessing
+```
+
+### MobileCLIP Export Pipeline (Track E)
+
+```
+MobileCLIP2 Model (.pt)
+    ├─→ Image Encoder: PyTorch → ONNX → TensorRT (256x256 → 512-dim)
+    └─→ Text Encoder:  PyTorch → ONNX → TensorRT (77 tokens → 512-dim)
 ```
 
 ### Model Naming Convention
@@ -32,17 +51,17 @@ PyTorch Model (.pt)
 For each YOLO model size (nano/small/medium), exports create:
 
 ```
+pytorch_models/
+└── yolo11s.pt                        # Track A: PyTorch model (used directly)
+
 models/
-├── yolov11_small/                    # Track A: Standard ONNX
-│   ├── 1/model.onnx
-│   └── config.pbtxt
 ├── yolov11_small_trt/                # Track B: TensorRT Engine
 │   ├── 1/model.plan
 │   └── config.pbtxt
 ├── yolov11_small_end2end/            # Track C: ONNX End2End (intermediate)
 │   ├── 1/model.onnx
 │   └── config.pbtxt
-└── yolov11_small_trt_end2end/        # Track C: TRT End2End (fastest)
+└── yolov11_small_trt_end2end/        # Track C/D: TRT End2End (fastest)
     ├── 1/model.plan
     └── config.pbtxt
 ```
@@ -51,7 +70,7 @@ models/
 
 ### 1. export_models.py
 
-**Purpose**: Unified export script that generates YOLO models in all four formats.
+**Purpose**: Unified export script that generates YOLO models in all four formats with normalized bounding boxes.
 
 **What it does**:
 - Loads PyTorch YOLO models (`.pt` files)
@@ -61,26 +80,18 @@ models/
 - Generates Triton-compatible model files and configs
 - Validates exports and provides detailed summaries
 
-**Four export formats**:
+**Export formats**:
 
-#### Format 1: Standard ONNX (Track A)
-- **Output**: `models/{model_name}/1/model.onnx`
-- **Output format**: `[84, 8400]` (raw detections, no NMS)
-- **NMS**: CPU post-processing required
-- **Use case**: Maximum compatibility, baseline performance
-- **Speed**: Baseline inference + 5-10ms CPU NMS
+#### Track A: PyTorch (No Export Needed)
+- **Output**: Uses `pytorch_models/yolo11{n,s,m,l,x}.pt` directly
+- **Output format**: Native Ultralytics results
+- **NMS**: CPU post-processing (built into Ultralytics)
+- **Use case**: Development, debugging, baseline reference
+- **Speed**: Baseline inference
 
-```python
-# Exports with dynamic batching enabled
-model.export(
-    format="onnx",
-    dynamic=True,    # Variable batch/height/width
-    simplify=True,   # Optimize for TensorRT
-    half=True        # FP16 precision
-)
-```
+Track A loads PyTorch models at startup via Ultralytics SDK - no export required.
 
-#### Format 2: TensorRT Engine (Track B)
+#### Track B: TensorRT Engine
 - **Output**: `models/{model_name}_trt/1/model.plan`
 - **Output format**: `[84, 8400]` (raw detections, no NMS)
 - **NMS**: CPU post-processing required
@@ -96,7 +107,7 @@ model.export(
 # - Optimized for A6000 GPU
 ```
 
-#### Format 3: ONNX End2End (Track C - Intermediate)
+#### Track C: ONNX End2End (Intermediate)
 - **Output**: `models/{model_name}_end2end/1/model.onnx`
 - **Output format**: `num_dets, det_boxes, det_scores, det_classes`
 - **NMS**: GPU (TensorRT EfficientNMS operators)
@@ -106,12 +117,12 @@ model.export(
 ```python
 # Uses custom Ultralytics patch (export_onnx_trt)
 # - Embeds TRT::EfficientNMS_TRT operators
-# - topk_all=100: Max detections per image
-# - iou_thres=0.45: NMS IoU threshold
+# - topk_all=300: Max detections per image
+# - iou_thres=0.7: NMS IoU threshold
 # - conf_thres=0.25: Confidence threshold
 ```
 
-#### Format 4: TRT End2End (Track C - Final)
+#### Track C/D: TRT End2End (Final)
 - **Output**: `models/{model_name}_trt_end2end/1/model.plan`
 - **Output format**: `num_dets, det_boxes, det_scores, det_classes`
 - **NMS**: Compiled GPU NMS (fastest)
@@ -119,29 +130,50 @@ model.export(
 - **Speed**: 3-5x faster than Track A
 - **Build time**: 5-10 minutes (compiles NMS into TensorRT engine)
 
-**Usage**:
+**Usage via Makefile** (recommended):
 
 ```bash
-# Export all formats for all models (default)
-docker compose exec yolo-api python /app/export/export_models.py
+# Export small model (TRT + End2End with normalized boxes)
+make export-models
+
+# Export all formats for all models
+make export-all
+
+# Export only End2End formats (Track C/D)
+make export-end2end
+
+# Export ONNX only
+make export-onnx
+
+# Check export status
+make export-status
+
+# Clean old exports before re-exporting
+make clean-exports
+```
+
+**Direct usage** (advanced):
+
+```bash
+# Export all formats for all models
+docker compose exec yolo-api python /app/export/export_models.py --normalize-boxes
 
 # Export only TRT End2End (Track C) for small model
 docker compose exec yolo-api python /app/export/export_models.py \
     --models small \
-    --formats trt_end2end
-
-# Export standard formats only (Tracks A & B)
-docker compose exec yolo-api python /app/export/export_models.py \
-    --formats onnx trt
-
-# Export end2end formats (Track C)
-docker compose exec yolo-api python /app/export/export_models.py \
-    --formats onnx_end2end trt_end2end
+    --formats trt_end2end \
+    --normalize-boxes
 ```
 
 **Command-line arguments**:
-- `--models`: Model sizes to export (`nano`, `small`, `medium`, or `all`)
+- `--models`: Built-in model sizes (`nano`, `small`, `medium`, `large`, `xlarge`)
+- `--custom-model`: Custom trained model path (see [Custom Model Export](#custom-model-export) below)
+- `--config-file`: YAML configuration file for multiple models
 - `--formats`: Export formats (`onnx`, `trt`, `onnx_end2end`, `trt_end2end`, or `all`)
+- `--normalize-boxes`: Output normalized coordinates [0-1] instead of pixel coordinates (required for Triton)
+- `--save-labels`: Auto-extract and save class names to `labels.txt`
+- `--generate-config`: Auto-generate Triton `config.pbtxt` files
+- `--list-models`: List available built-in models and exit
 
 **Model configurations**:
 
@@ -149,15 +181,23 @@ docker compose exec yolo-api python /app/export/export_models.py \
 MODELS = {
     "nano": {
         "max_batch": 128,  # Nano is small, can handle large batches
-        "topk": 100        # Max detections per image
+        "topk": 300        # Max detections per image
     },
     "small": {
         "max_batch": 64,
-        "topk": 100
+        "topk": 300
     },
     "medium": {
         "max_batch": 32,
-        "topk": 100
+        "topk": 300
+    },
+    "large": {
+        "max_batch": 16,
+        "topk": 300
+    },
+    "xlarge": {
+        "max_batch": 8,
+        "topk": 300
     }
 }
 ```
@@ -166,33 +206,243 @@ MODELS = {
 - Image size: 640x640
 - Precision: FP16 (half precision)
 - Device: GPU 0
-- NMS thresholds: IoU=0.45, Confidence=0.25
+- NMS thresholds: IoU=0.7, Confidence=0.25
 
 ---
 
-### 2. download_pytorch_models.sh
+### Custom Model Export
 
-**Purpose**: Downloads pre-trained PyTorch YOLO models from Ultralytics GitHub releases.
+Export your own custom-trained YOLO11 models for deployment on Triton.
 
-**What it does**:
-- Creates `pytorch_models/` directory
-- Downloads YOLO `.pt` files from official Ultralytics releases
-- Skips already-downloaded models
-- Verifies file sizes
-
-**Current configuration**:
-Downloads only the **small** model for focused benchmarking:
-- `yolo11s.pt` (Small model, ~40MB)
-
-**Usage**:
+#### Quick Start (Makefile)
 
 ```bash
-# Run from repository root
-bash export/download_pytorch_models.sh
+# Export a custom model (simplest)
+make export-custom MODEL=/app/pytorch_models/my_detector.pt
 
-# Or from anywhere
-cd /path/to/triton-api
-./export/download_pytorch_models.sh
+# Export with custom name and batch size
+make export-custom MODEL=/app/pytorch_models/my_detector.pt NAME=vehicle_detector BATCH=64
+
+# List available built-in models
+make export-list
+```
+
+#### Direct CLI Usage
+
+```bash
+# Basic: export custom model with auto-generated name
+docker compose exec yolo-api python /app/export/export_models.py \
+    --custom-model /app/pytorch_models/my_model.pt \
+    --formats trt trt_end2end \
+    --normalize-boxes \
+    --save-labels \
+    --generate-config
+
+# Advanced: custom name and batch size (format: path:name:batch)
+docker compose exec yolo-api python /app/export/export_models.py \
+    --custom-model /app/pytorch_models/my_model.pt:vehicle_detector:64 \
+    --formats trt trt_end2end \
+    --normalize-boxes
+
+# Multiple custom models at once
+docker compose exec yolo-api python /app/export/export_models.py \
+    --custom-model /app/pytorch_models/model1.pt:detector1 \
+    --custom-model /app/pytorch_models/model2.pt:detector2:32 \
+    --formats trt_end2end
+```
+
+#### YAML Configuration File
+
+For complex deployments with multiple models, use a YAML configuration file:
+
+```yaml
+# models_config.yaml
+models:
+  vehicle_detector:
+    pt_file: /app/pytorch_models/vehicle_yolo11s.pt
+    triton_name: vehicle_detector_v1  # optional, auto-generated if omitted
+    max_batch: 64                      # optional, default 32
+    topk: 300                          # optional, default 300
+    # num_classes: 5                   # optional, auto-detected from model
+    # class_names:                     # optional, auto-detected from model
+    #   - car
+    #   - truck
+    #   - bus
+    #   - motorcycle
+    #   - bicycle
+
+  person_detector:
+    pt_file: /app/pytorch_models/person_yolo11m.pt
+    triton_name: person_detector_v1
+    max_batch: 32
+
+  defect_detector:
+    pt_file: /app/pytorch_models/defect_yolo11n.pt
+    # Uses auto-generated name: defect_yolo11n
+    max_batch: 128  # Small model, can handle larger batches
+```
+
+Export using config file:
+
+```bash
+# Via Makefile
+make export-config CONFIG=/app/export/models_config.yaml
+
+# Direct CLI
+docker compose exec yolo-api python /app/export/export_models.py \
+    --config-file /app/export/models_config.yaml \
+    --formats trt trt_end2end \
+    --normalize-boxes \
+    --save-labels \
+    --generate-config
+```
+
+#### Auto-Generated Files
+
+When exporting custom models with `--save-labels` and `--generate-config`, the script automatically creates:
+
+```
+models/
+└── vehicle_detector_trt_end2end/
+    ├── 1/
+    │   └── model.plan          # TensorRT engine
+    ├── config.pbtxt            # Auto-generated Triton config
+    └── labels.txt              # Class names extracted from model
+```
+
+**labels.txt example** (auto-extracted from model):
+```
+car
+truck
+bus
+motorcycle
+bicycle
+```
+
+**config.pbtxt example** (auto-generated):
+```
+name: "vehicle_detector_trt_end2end"
+platform: "tensorrt_plan"
+max_batch_size: 64
+
+input [
+  {
+    name: "images"
+    data_type: TYPE_FP16
+    dims: [ 3, 640, 640 ]
+  }
+]
+
+output [
+  {
+    name: "num_dets"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  ...
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 8, 16, 32, 64 ]
+  max_queue_delay_microseconds: 5000
+}
+```
+
+#### Custom Model Requirements
+
+Your custom YOLO11 model must:
+1. Be a valid Ultralytics YOLO11 `.pt` file (trained with `ultralytics` library)
+2. Use 640x640 input size (standard YOLO11)
+3. Have class names embedded (automatic if trained with Ultralytics)
+
+**Supported model architectures**:
+- YOLO11n, YOLO11s, YOLO11m, YOLO11l, YOLO11x (detection)
+- Custom-trained variants based on above
+
+**Not supported** (yet):
+- YOLO11 segmentation models
+- YOLO11 pose estimation models
+- YOLO11 OBB (oriented bounding box) models
+- Non-Ultralytics YOLO variants
+
+#### Workflow for Custom Models
+
+1. **Copy your model** to the container:
+   ```bash
+   # Option A: Mount volume in docker-compose.yml
+   # volumes:
+   #   - ./my_models:/app/custom_models
+
+   # Option B: Copy directly
+   docker cp my_detector.pt $(docker compose ps -q yolo-api):/app/pytorch_models/
+   ```
+
+2. **Export the model**:
+   ```bash
+   make export-custom MODEL=/app/pytorch_models/my_detector.pt NAME=my_detector BATCH=32
+   ```
+
+3. **Restart Triton** to load the new model:
+   ```bash
+   make restart-triton
+   ```
+
+4. **Test the model**:
+   ```bash
+   curl -X POST http://localhost:4603/predict/my_detector_end2end \
+       -F "image=@test_images/test.jpg" | jq '.'
+   ```
+
+---
+
+### 2. download_pytorch_models.py
+
+**Purpose**: Downloads pre-trained PyTorch YOLO models using Ultralytics' built-in download functionality.
+
+**What it does**:
+- Uses Ultralytics' `attempt_download_asset()` for reliable downloads
+- Automatic retry on failure with curl fallback
+- Disk space validation before download
+- Skips already-downloaded models
+- Supports downloading specific models or all models
+
+**Available models** (YOLO11 lineup):
+- `nano` → `yolo11n.pt` (~6 MB) - Fastest, lowest accuracy
+- `small` → `yolo11s.pt` (~18 MB) - Good balance
+- `medium` → `yolo11m.pt` (~39 MB) - Better accuracy
+- `large` → `yolo11l.pt` (~49 MB) - High accuracy
+- `xlarge` → `yolo11x.pt` (~109 MB) - Highest accuracy, slowest
+
+**Usage via Makefile** (recommended):
+
+```bash
+# Download small model (default)
+make download-pytorch
+
+# Download specific models
+make download-pytorch MODELS="small medium large"
+
+# Download all models (nano through xlarge)
+make download-pytorch-all
+
+# List available models
+make download-pytorch-list
+```
+
+**Direct usage**:
+
+```bash
+# Download small model (default)
+docker compose exec yolo-api python /app/export/download_pytorch_models.py
+
+# Download specific models
+docker compose exec yolo-api python /app/export/download_pytorch_models.py --models small medium
+
+# Download all models
+docker compose exec yolo-api python /app/export/download_pytorch_models.py --models all
+
+# List available models
+docker compose exec yolo-api python /app/export/download_pytorch_models.py --list
 ```
 
 **Output**:
@@ -201,88 +451,139 @@ pytorch_models/
 └── yolo11s.pt
 ```
 
-**Extending to other models**:
+---
 
-To download additional models, edit the `MODELS` array in the script:
+### 3. export_mobileclip_image_encoder.py
+
+**Purpose**: Export MobileCLIP2 image encoder for Track E visual search deployment.
+
+**What it does**:
+- Loads MobileCLIP2 model with proper configuration (image_mean=0, image_std=1)
+- Reparameterizes model before export (merges train-time branches)
+- Exports to ONNX with dynamic batch support
+- Converts to TensorRT engine for maximum throughput
+- Validates output matches PyTorch
+- Benchmarks inference performance
+
+**Supported models**:
+- **MobileCLIP2-S2** (35.7M params) - Recommended, balanced speed/accuracy
+- **MobileCLIP2-B** (86.3M params) - Maximum accuracy
+
+**Model specifications**:
+- Input: `images [B, 3, 256, 256]` FP32, normalized [0, 1]
+- Output: `image_embeddings [B, 512]` FP32, L2-normalized
+- Opset version: 17 (optimized for TensorRT 10.x)
+- Dynamic batching: 1 to 128 (configurable)
+
+**Usage via Makefile** (recommended):
 
 ```bash
-declare -A MODELS=(
-    ["yolo11n.pt"]="https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt"
-    ["yolo11s.pt"]="https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11s.pt"
-    ["yolo11m.pt"]="https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11m.pt"
-)
+# Export both image and text encoders (MobileCLIP2-S2)
+make export-mobileclip
 ```
+
+**Direct usage**:
+
+```bash
+# Export MobileCLIP2-S2 image encoder (default, recommended)
+docker compose exec yolo-api python /app/export/export_mobileclip_image_encoder.py
+
+# Export MobileCLIP2-B image encoder (higher accuracy)
+docker compose exec yolo-api python /app/export/export_mobileclip_image_encoder.py --model B
+
+# Export ONNX only (skip TensorRT conversion)
+docker compose exec yolo-api python /app/export/export_mobileclip_image_encoder.py --skip-tensorrt
+
+# Use FP32 precision instead of FP16
+docker compose exec yolo-api python /app/export/export_mobileclip_image_encoder.py --fp32
+
+# Customize max batch size
+docker compose exec yolo-api python /app/export/export_mobileclip_image_encoder.py --max-batch-size 64
+```
+
+**Output files**:
+```
+pytorch_models/
+└── mobileclip2_s2_image_encoder.onnx  # Intermediate ONNX model
+
+models/
+└── mobileclip2_s2_image_encoder/
+    ├── 1/
+    │   └── model.plan                 # TensorRT engine for Triton
+    └── config.pbtxt                   # Triton configuration (manual)
+```
+
+**Key implementation notes**:
+- **CRITICAL**: Must call `reparameterize_model()` before export or inference will be incorrect
+- Uses simple ÷255 normalization (same as YOLO), compatible with DALI pipeline
+- L2 normalization applied to outputs for cosine similarity search
+- FP16 precision enabled by default for 2x speedup
 
 ---
 
-### 3. cleanup_for_reexport.sh
+### 4. export_mobileclip_text_encoder.py
 
-**Purpose**: Prepares the environment for a clean re-export by removing old model files while preserving configurations.
-
-**What it does**:
-1. **Backs up configs**: Copies all `config.pbtxt` files to timestamped backup directory
-2. **Removes old exports**: Deletes `.onnx` and `.plan` files from model directories
-3. **Archives old scripts**: Moves deprecated export scripts to `scripts/archived/`
-4. **Clears TRT cache**: Removes TensorRT engine cache files
-
-**Usage**:
-
-```bash
-# Run from repository root
-bash export/cleanup_for_reexport.sh
-```
-
-**What gets removed**:
-- `models/yolov11_*/1/model.onnx` (and `.onnx.old` backups)
-- `models/yolov11_*_trt/1/model.plan` (and `.plan.old` backups)
-- `trt_cache/*` (TensorRT build cache)
-
-**What gets preserved**:
-- `models/yolov11_*/config.pbtxt` (backed up to `models/backup_configs_*/`)
-- Directory structure (all `models/*/1/` directories remain)
-
-**Use cases**:
-- Re-exporting models after Ultralytics updates
-- Testing different export settings
-- Troubleshooting failed exports
-- Cleaning up disk space before fresh export
-
----
-
-### 4. export_small_only.sh
-
-**Purpose**: Convenience script that exports only the `small` model in optimized formats (Tracks B & C).
+**Purpose**: Export MobileCLIP2 text encoder for Track E text-to-image search.
 
 **What it does**:
-- Exports `yolo11s` (small) model only
-- Exports both TRT and TRT End2End formats
-- Skips ONNX formats (assumes you don't need them for production)
-- Provides next-steps guidance for Track D setup
+- Loads MobileCLIP2 text encoder (shared across S2/B variants)
+- Reparameterizes model before export
+- Exports to ONNX with dynamic batch support
+- Converts to TensorRT engine for maximum throughput
+- Validates with real text queries
+- Tests embedding similarity
 
-**Usage**:
+**Supported models**:
+- **MobileCLIP2-S2** (63.4M text encoder) - Same encoder as S0/B
+- **MobileCLIP2-B** (63.4M text encoder) - Same encoder as S0/S2
+
+**Model specifications**:
+- Input: `text_tokens [B, 77]` INT64 token IDs
+- Output: `text_embeddings [B, 512]` FP32, L2-normalized
+- Opset version: 17 (optimized for TensorRT 10.x)
+- Dynamic batching: 1 to 64 (configurable)
+- Context length: 77 tokens (max sequence length)
+
+**Usage via Makefile** (recommended):
 
 ```bash
-# Run from repository root
-bash export/export_small_only.sh
+# Export both image and text encoders
+make export-mobileclip
 ```
 
-**Equivalent to**:
+**Direct usage**:
+
 ```bash
-docker compose exec yolo-api python /app/export/export_models.py \
-    --models small \
-    --formats trt trt_end2end
+# Export MobileCLIP2-S2 text encoder (default)
+docker compose exec yolo-api python /app/export/export_mobileclip_text_encoder.py
+
+# Export MobileCLIP2-B text encoder (identical to S2)
+docker compose exec yolo-api python /app/export/export_mobileclip_text_encoder.py --model B
+
+# Export ONNX only (skip TensorRT)
+docker compose exec yolo-api python /app/export/export_mobileclip_text_encoder.py --skip-tensorrt
+
+# Customize max batch size
+docker compose exec yolo-api python /app/export/export_mobileclip_text_encoder.py --max-batch-size 32
 ```
 
-**What gets exported**:
-- `models/yolov11_small_trt/1/model.plan` (Track B)
-- `models/yolov11_small_trt_end2end/1/model.plan` (Track C)
+**Output files**:
+```
+pytorch_models/
+└── mobileclip2_s2_text_encoder.onnx   # Intermediate ONNX model
 
-**Next steps after running** (printed by script):
-1. Create DALI pipeline for Track D
-2. Create ensemble models for Track D
-3. Restart Triton to load new models
+models/
+└── mobileclip2_s2_text_encoder/
+    ├── 1/
+    │   └── model.plan                 # TensorRT engine for Triton
+    └── config.pbtxt                   # Triton configuration (manual)
+```
 
-**Use case**: Simplified workflow for benchmarking focused on the small model only.
+**Key implementation notes**:
+- Text encoder is shared across MobileCLIP2-S0, S2, and B variants
+- Handles token embeddings, positional encoding, transformer layers, and pooling
+- L2 normalization ensures compatibility with image embeddings for similarity search
+- Test queries included for validation: "a photo of a dog", "red car on highway", etc.
 
 ---
 
@@ -292,22 +593,22 @@ docker compose exec yolo-api python /app/export/export_models.py \
 
 1. **Download PyTorch models**:
    ```bash
-   bash export/download_pytorch_models.sh
+   make download-pytorch
    ```
 
 2. **Export all formats** (recommended for testing):
    ```bash
-   docker compose exec yolo-api python /app/export/export_models.py
+   make export-models
    ```
 
 3. **Restart Triton** to load exported models:
    ```bash
-   docker compose restart triton-api
+   make restart-triton
    ```
 
 4. **Verify models loaded**:
    ```bash
-   docker compose exec triton-api curl localhost:8000/v2/models
+   make validate-exports
    ```
 
 ### Production Workflow (Small Model Only)
@@ -316,23 +617,46 @@ For focused benchmarking with just the small model:
 
 1. **Download model**:
    ```bash
-   bash export/download_pytorch_models.sh
+   make download-pytorch
    ```
 
 2. **Export optimized formats**:
    ```bash
-   bash export/export_small_only.sh
+   make export-small
    ```
 
 3. **Create Track D components** (see [dali/README.md](../dali/README.md)):
    ```bash
-   docker compose exec yolo-api python /app/dali/create_dali_letterbox_pipeline.py
-   docker compose exec yolo-api python /app/dali/create_ensembles.py --models small
+   make create-dali
    ```
 
-4. **Restart Triton**:
+4. **Verify all tracks working**:
    ```bash
-   docker compose restart triton-api
+   make test-all-tracks
+   ```
+
+### Track E Setup (Visual Search)
+
+For Track E visual search with MobileCLIP:
+
+1. **Download MobileCLIP models** (on host):
+   ```bash
+   bash scripts/track_e/setup_mobileclip_env.sh
+   ```
+
+2. **Export MobileCLIP encoders**:
+   ```bash
+   make export-mobileclip
+   ```
+
+3. **Create Track E pipeline** (see [dali/README.md](../dali/README.md)):
+   ```bash
+   make create-dali-dual
+   ```
+
+4. **Verify Track E working**:
+   ```bash
+   make test-track-e
    ```
 
 ### Re-exporting Models
@@ -341,17 +665,22 @@ If you need to re-export (e.g., after updating Ultralytics or changing settings)
 
 1. **Clean old exports**:
    ```bash
-   bash export/cleanup_for_reexport.sh
+   make clean-exports
    ```
 
-2. **Re-export**:
+2. **Check status** (verify files removed):
    ```bash
-   docker compose exec yolo-api python /app/export/export_models.py
+   make export-status
    ```
 
-3. **Restart Triton**:
+3. **Re-export**:
    ```bash
-   docker compose restart triton-api
+   make export-models
+   ```
+
+4. **Restart Triton**:
+   ```bash
+   make restart-triton
    ```
 
 ## Key Implementation Details
@@ -423,11 +752,15 @@ All exports support **dynamic batching** with these characteristics:
 | Nano | 1 | 64 | 128 |
 | Small | 1 | 32 | 64 |
 | Medium | 1 | 16 | 32 |
+| Large | 1 | 8 | 16 |
+| XLarge | 1 | 4 | 8 |
 
 **Why different max batch sizes?**
 - Nano: Smallest model, fits more in GPU memory
-- Small: Balanced size
-- Medium: Larger model, requires more memory per image
+- Small: Good balance of speed and accuracy
+- Medium: More accurate, moderate memory usage
+- Large: High accuracy, more memory per image
+- XLarge: Highest accuracy, largest memory footprint
 
 ### NMS Configuration
 
@@ -435,18 +768,18 @@ For End2End exports (Tracks C & D):
 
 ```python
 # NMS thresholds
-IOU_THRESHOLD = 0.45    # IoU threshold for NMS
+IOU_THRESHOLD = 0.7     # IoU threshold for NMS
 CONF_THRESHOLD = 0.25   # Confidence threshold
 
 # Detection limits
-TOPK = 100             # Max detections per image
+TOPK = 300              # Max detections per image
 ```
 
 **Output format**:
-- `num_dets`: INT32 [1] - Number of detections (0-100)
-- `det_boxes`: FP32 [100, 4] - Bounding boxes (x, y, w, h)
-- `det_scores`: FP32 [100] - Confidence scores
-- `det_classes`: INT32 [100] - Class IDs (0-79 for COCO)
+- `num_dets`: INT32 [1] - Number of detections (0-300)
+- `det_boxes`: FP32 [300, 4] - Bounding boxes (x, y, w, h)
+- `det_scores`: FP32 [300] - Confidence scores
+- `det_classes`: INT32 [300] - Class IDs (0-79 for COCO)
 
 ## Performance Characteristics
 
@@ -485,17 +818,23 @@ TOPK = 100             # Max detections per image
 ```
 /app/
 ├── export/
-│   ├── export_models.py              # Main export script
-│   ├── download_pytorch_models.sh    # Download .pt files
-│   ├── cleanup_for_reexport.sh       # Cleanup utility
-│   └── export_small_only.sh          # Small-model convenience script
+│   ├── export_models.py                        # YOLO export script
+│   ├── download_pytorch_models.py              # Download YOLO .pt files
+│   ├── export_mobileclip_image_encoder.py      # MobileCLIP image encoder export
+│   ├── export_mobileclip_text_encoder.py       # MobileCLIP text encoder export
+│   └── README.md                               # This documentation
 ├── pytorch_models/
-│   └── yolo11s.pt                    # PyTorch source model
+│   ├── yolo11s.pt                              # YOLO PyTorch model
+│   ├── mobileclip2_s2/                         # MobileCLIP checkpoint
+│   ├── mobileclip2_s2_image_encoder.onnx       # Intermediate ONNX
+│   └── mobileclip2_s2_text_encoder.onnx        # Intermediate ONNX
 └── models/
-    ├── yolov11_small/                # Track A: ONNX
-    ├── yolov11_small_trt/            # Track B: TRT
-    ├── yolov11_small_end2end/        # Track C: ONNX End2End
-    └── yolov11_small_trt_end2end/    # Track C: TRT End2End
+    ├── yolov11_small/                          # Track A: ONNX
+    ├── yolov11_small_trt/                      # Track B: TRT
+    ├── yolov11_small_end2end/                  # Track C: ONNX End2End
+    ├── yolov11_small_trt_end2end/              # Track C: TRT End2End
+    ├── mobileclip2_s2_image_encoder/           # Track E: Image encoder
+    └── mobileclip2_s2_text_encoder/            # Track E: Text encoder
 ```
 
 ### Host Paths (Mounted Volumes)
@@ -512,7 +851,7 @@ TOPK = 100             # Max detections per image
 
 ```bash
 # Download PyTorch models first
-bash export/download_pytorch_models.sh
+make download-pytorch
 ```
 
 ### "Failed to build TensorRT engine"

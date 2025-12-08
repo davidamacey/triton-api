@@ -1,13 +1,15 @@
 services:
   triton-api:
-    image: nvcr.io/nvidia/tritonserver:25.10-py3
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: Dockerfile.triton
+    image: triton-api-pytorch:25.10
     container_name: triton-api
     restart: always
     ports:
-      - 9500:8000
-      - 9501:8001
-      - 9502:8002
+      - 4600:8000  # HTTP
+      - 4601:8001  # gRPC
+      - 4602:8002  # Metrics
     volumes:
       - ./models:/models
     command:
@@ -17,28 +19,32 @@ services:
       - --strict-model-config=false
       - --model-control-mode=explicit
       # ===================================================================
-      # TRACK D ONLY - Maximum Performance Focus
+      # MULTI-TRACK BENCHMARK CONFIGURATION
       # ===================================================================
-      # Track A (PyTorch): Disabled in yolo-api
-      # Track B (Standard TRT): Commented out below
-      # Track C (End2End TRT): Commented out below
-      # Track D (DALI + TRT End2End): ENABLED with increased instances
+      # GPU 0: Track B, C (standalone), Track E (visual search)
+      # GPU 2: Track D (DALI ensembles - batch/streaming)
+      # Track A: PyTorch in yolo-api (no Triton models needed)
       # ===================================================================
-      # Track B: Standard TRT with CPU NMS (DISABLED)
-      # - --load-model=yolov11_small_trt
-      # Track C: End2End TRT with GPU NMS, CPU preprocessing (DISABLED)
-      # - --load-model=yolov11_small_trt_end2end
-      # Track D Components: DALI + TRT End2End (Full GPU Pipeline)
-      - --load-model=yolo_preprocess_dali_batch         # DALI batch preprocessing
-      - --load-model=yolo_preprocess_dali               # DALI balanced preprocessing
-      - --load-model=yolo_preprocess_dali_streaming     # DALI streaming preprocessing
-      - --load-model=yolov11_small_trt_end2end_batch    # TRT End2End for batch
-      - --load-model=yolov11_small_trt_end2end          # TRT End2End for balanced
-      - --load-model=yolov11_small_trt_end2end_streaming # TRT End2End for streaming
-      # Track D Ensembles: Three performance tiers (CPU affine matrix calculation)
-      - --load-model=yolov11_small_gpu_e2e_streaming    # Low latency (video streaming)
-      - --load-model=yolov11_small_gpu_e2e              # Balanced (general purpose)
-      - --load-model=yolov11_small_gpu_e2e_batch        # High throughput (batch processing)
+      #
+      # Track B (GPU 0): Standard TRT with CPU NMS
+      - --load-model=yolov11_small_trt                 # YOLO detection (TRT + CPU NMS via Ultralytics)
+      #
+      # Track C (GPU 0): End2End TRT standalone
+      - --load-model=yolov11_small_trt_end2end         # YOLO detection (TRT + GPU NMS)
+      #
+      # Track D (GPU 2): DALI + End2End ensemble (batch only - images)
+      # Uses shared yolov11_small_trt_end2end model (same as Track C/E)
+      - --load-model=yolo_preprocess_dali_batch        # DALI preprocessing (batch)
+      - --load-model=yolov11_small_gpu_e2e_batch       # Track D ensemble (batch)
+      #
+      # Track E (GPU 0): Visual Search with MobileCLIP
+      - --load-model=yolo_clip_preprocess_dali         # Fast DALI (YOLO 640 + CLIP 256)
+      - --load-model=dual_preprocess_dali              # Triple-branch DALI (includes HD crop)
+      - --load-model=mobileclip2_s2_image_encoder      # Image embeddings (TensorRT)
+      - --load-model=mobileclip2_s2_text_encoder       # Text embeddings (TensorRT)
+      - --load-model=box_embedding_extractor           # Per-box embeddings (Python + BLS)
+      - --load-model=yolo_clip_ensemble                # Track E simple ensemble
+      - --load-model=yolo_mobileclip_ensemble          # Track E full ensemble
       # ===================================================================
       - --log-verbose=1
       - --log-info=true
@@ -51,7 +57,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: [ '0', '2' ]  # Both A6000 GPUs (GPU 0 + GPU 2) for parallel processing
+              device_ids: [ '0', '2' ]  # GPU 0: Track C/E, GPU 2: Track D
               capabilities:
                 - gpu
     networks:
@@ -74,6 +80,13 @@ services:
       - ./models:/app/models
       - ./pytorch_models:/app/pytorch_models
       - ./test_images:/app/test_images
+      - ./reference_repos:/app/reference_repos  # Track E: MobileCLIP repos (persisted)
+      - ./cache/huggingface:/root/.cache/huggingface  # Track E: HuggingFace tokenizers (persistent)
+    environment:
+      - ENABLE_PYTORCH=true  # Enable Track A for comparison testing
+      # HuggingFace cache configuration (industry standard)
+      - HF_HOME=/root/.cache/huggingface
+      - HF_HUB_CACHE=/root/.cache/huggingface/hub
     shm_size: 8g
     stdin_open: true # Keep stdin open
     tty: true # Allocate a pseudo-TTY
@@ -81,14 +94,14 @@ services:
       - uvicorn
       - src.main:app
       - --host=0.0.0.0
-      - --port=9600
+      - --port=8000
       # ===================================================================
       # Worker Configuration (Performance Tuning)
-      # Recommended: (2 × CPU cores) + 1
-      # Dual-GPU: Increased to 64 workers to feed both GPUs (2x previous)
-      # Adjust based on: CPU cores, memory, and GPU contention
+      # Production: 64 workers for dual-GPU throughput
+      # Testing with PyTorch (ENABLE_PYTORCH=true): Use 2 workers to avoid
+      # loading 64 copies of the model (~1-3GB wasted GPU memory)
       # ===================================================================
-      - --workers=64
+      - --workers=2  # Reduced for PyTorch comparison testing (was 64)
       - --limit-max-requests=10000       # Recycle workers every 10k requests (prevents memory leaks)
       # ===================================================================
       # Event Loop & HTTP Protocol (Already Optimized)
@@ -108,7 +121,7 @@ services:
       - --access-log
       - --log-level=info
     ports:
-      - 9600:9600
+      - 4603:8000  # FastAPI
     ulimits:
       memlock: -1
       stack: 67108864
@@ -154,7 +167,7 @@ services:
     container_name: triton-prometheus
     restart: always
     ports:
-      - 9090:9090
+      - 4604:9090  # Prometheus
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
       - ./monitoring/alerts:/etc/prometheus/alerts
@@ -175,7 +188,7 @@ services:
     container_name: triton-grafana
     restart: always
     ports:
-      - 3000:3000
+      - 4605:3000  # Grafana
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
@@ -197,7 +210,7 @@ services:
     restart: always
     user: "0"  # Run as root to avoid permission issues
     ports:
-      - 3100:3100
+      - 4606:3100  # Loki
     volumes:
       - ./monitoring/loki-config.yml:/etc/loki/local-config.yaml
       - loki_data:/loki
@@ -219,6 +232,60 @@ services:
     depends_on:
       - loki
 
+  # ===================================================================
+  # Track E: OpenSearch for Visual Search (Vector Database)
+  # OpenSearch 3.x with k-NN plugin for vector similarity search
+  # ===================================================================
+  opensearch:
+    image: opensearchproject/opensearch:3.3.1
+    container_name: triton-opensearch
+    restart: always
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms2g -Xmx2g"  # Heap size (adjust based on RAM)
+      - DISABLE_SECURITY_PLUGIN=true  # Disable security for dev (enable in production)
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    ports:
+      - 4607:9200  # REST API
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS http://localhost:9200 || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+    networks:
+      - triton_net
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:3.3.0
+    container_name: triton-opensearch-dashboards
+    restart: always
+    environment:
+      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true  # Must match OpenSearch security setting
+    ports:
+      - 4608:5601  # OpenSearch Dashboards
+    volumes:
+      - opensearch_dashboards_data:/usr/share/opensearch-dashboards/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS http://localhost:5601 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+    networks:
+      - triton_net
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
 networks:
   triton_net:
     driver: bridge
@@ -227,3 +294,5 @@ volumes:
   prometheus_data:
   grafana_data:
   loki_data:
+  opensearch_data:
+  opensearch_dashboards_data:

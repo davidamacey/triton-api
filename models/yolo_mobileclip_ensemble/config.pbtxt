@@ -1,0 +1,177 @@
+# Track E: YOLO + MobileCLIP Visual Search Ensemble
+#
+# Full GPU pipeline for visual search with native-resolution cropping:
+# 1. DALI: Decode + triple preprocessing (YOLO 640×640, CLIP 256×256, Original NATIVE-res)
+# 2. YOLO: Object detection with GPU NMS (parallel with step 3)
+# 3. MobileCLIP: Global image embedding (parallel with step 2)
+# 4. Box Extractor: Per-object embeddings from NATIVE-RES crops (via BLS + ROI align)
+#
+# Key Features:
+# - Native resolution: No upscaling of small images, no arbitrary downscaling
+# - Normalized outputs: Bounding boxes in [0, 1] range for any image size
+# - MobileCLIP2 compliant: Follows official preprocessing guidelines
+# - High quality: Crops from original resolution, not from 256×256
+#
+# Input: Raw JPEG bytes + affine matrix
+# Outputs: Detections + embeddings + normalized boxes [0, 1]
+
+name: "yolo_mobileclip_ensemble"
+platform: "ensemble"
+max_batch_size: 64
+
+input [
+  {
+    name: "encoded_images"
+    data_type: TYPE_UINT8
+    dims: [ -1 ]
+  },
+  {
+    name: "affine_matrices"
+    data_type: TYPE_FP32
+    dims: [ 2, 3 ]
+  }
+]
+
+output [
+  # YOLO detections
+  {
+    name: "num_dets"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "det_boxes"
+    data_type: TYPE_FP32
+    dims: [ 300, 4 ]
+  },
+  {
+    name: "det_scores"
+    data_type: TYPE_FP32
+    dims: [ 300 ]
+  },
+  {
+    name: "det_classes"
+    data_type: TYPE_INT32
+    dims: [ 300 ]
+  },
+  # MobileCLIP embeddings (512-dim for MobileCLIP2-S2)
+  {
+    name: "global_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 512 ]
+  },
+  {
+    name: "box_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 300, 512 ]
+  },
+  {
+    name: "normalized_boxes"
+    data_type: TYPE_FP32
+    dims: [ 300, 4 ]  # Normalized [0, 1] boxes for any image size
+  }
+]
+
+ensemble_scheduling {
+  step [
+    # Step 1: Triple-branch DALI preprocessing
+    # Outputs: yolo_images (640×640) + clip_images (256×256) + original_images (full-res)
+    {
+      model_name: "dual_preprocess_dali"
+      model_version: -1
+      input_map {
+        key: "encoded_images"
+        value: "encoded_images"
+      }
+      input_map {
+        key: "affine_matrices"
+        value: "affine_matrices"
+      }
+      output_map {
+        key: "yolo_images"
+        value: "_yolo_images"
+      }
+      output_map {
+        key: "clip_images"
+        value: "_clip_images"
+      }
+      output_map {
+        key: "original_images"
+        value: "_original_images"
+      }
+    },
+
+    # Step 2: YOLO detection (runs in parallel with Step 3)
+    # Note: det_boxes mapped to both external output AND internal for box_embedding_extractor
+    {
+      model_name: "yolov11_small_trt_end2end"
+      model_version: -1
+      input_map {
+        key: "images"
+        value: "_yolo_images"
+      }
+      output_map {
+        key: "num_dets"
+        value: "num_dets"
+      }
+      output_map {
+        key: "det_boxes"
+        value: "det_boxes"
+      }
+      output_map {
+        key: "det_scores"
+        value: "det_scores"
+      }
+      output_map {
+        key: "det_classes"
+        value: "det_classes"
+      }
+    },
+
+    # Step 3: Global image embedding (runs in parallel with Step 2)
+    {
+      model_name: "mobileclip2_s2_image_encoder"
+      model_version: -1
+      input_map {
+        key: "images"
+        value: "_clip_images"
+      }
+      output_map {
+        key: "image_embeddings"
+        value: "global_embeddings"
+      }
+    },
+
+    # Step 4: Per-box embeddings (depends on Steps 1 & 2)
+    # Uses native-resolution original image for high-quality crops
+    # Outputs normalized boxes [0, 1] for any image size
+    {
+      model_name: "box_embedding_extractor"
+      model_version: -1
+      input_map {
+        key: "original_image"
+        value: "_original_images"
+      }
+      input_map {
+        key: "det_boxes"
+        value: "det_boxes"
+      }
+      input_map {
+        key: "num_dets"
+        value: "num_dets"
+      }
+      input_map {
+        key: "affine_matrix"
+        value: "affine_matrices"
+      }
+      output_map {
+        key: "box_embeddings"
+        value: "box_embeddings"
+      }
+      output_map {
+        key: "normalized_boxes"
+        value: "normalized_boxes"
+      }
+    }
+  ]
+}

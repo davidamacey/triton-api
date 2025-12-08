@@ -82,6 +82,45 @@ The end2end models use NVIDIA's **TensorRT EfficientNMS plugin** for GPU-acceler
 
 ---
 
+## Apple MobileCLIP (Track E)
+
+Track E visual search uses Apple's MobileCLIP2-S2 model for generating image and text embeddings.
+
+### Repository Information
+- **Repository:** https://github.com/apple/ml-mobileclip
+- **Paper:** "MobileCLIP: Fast Image-Text Models through Multi-Modal Reinforced Training"
+- **Model:** MobileCLIP2-S2 (35.7M parameters, 77.2% ImageNet accuracy)
+- **License:** Apple Sample Code License
+
+### Usage in This Project
+- Image encoder exported to TensorRT for GPU-accelerated embedding generation
+- Text encoder exported to TensorRT for text query embedding
+- Reference implementation cloned to `reference_repos/ml-mobileclip/` during setup
+- 512-dimensional L2-normalized embeddings for similarity search
+
+### Integration
+The MobileCLIP models are dynamically cloned during Track E setup via `scripts/track_e/setup_mobileclip_env.sh`. The repository applies patches to OpenCLIP for MobileCLIP2 support.
+
+---
+
+## OpenSearch (Track E)
+
+Track E uses OpenSearch for k-NN vector similarity search.
+
+### Information
+- **Provider:** OpenSearch Project (AWS-backed)
+- **Documentation:** https://opensearch.org/docs/latest/
+- **Version:** 3.3.1
+- **License:** Apache License 2.0
+
+### Features Used
+- k-NN plugin with HNSW algorithm for approximate nearest neighbor search
+- Cosine similarity for embedding comparisons
+- Nested document queries for per-object search
+- Bulk ingestion API for batch indexing
+
+---
+
 ## Reference Architectures
 
 The following repositories were used as **reference only** (no code directly copied):
@@ -126,6 +165,9 @@ Special thanks to:
 - **Ultralytics Team** - For the YOLO models and official ultralytics library
 - **NVIDIA Corporation** - For Triton Inference Server, TensorRT, and DALI
 - **Omar Abid (@omarabid59)** - For the yolov8-triton reference implementation
+- **Apple Machine Learning Research** - For MobileCLIP efficient vision-language models
+- **OpenSearch Project** - For the k-NN vector search engine
+- **OpenCLIP Contributors** - For the open-source CLIP implementation
 
 ---
 
@@ -143,6 +185,9 @@ This project's original code is licensed under **MIT License** (see [LICENSE](LI
 | NVIDIA Triton | BSD 3-Clause | ✓ Yes |
 | NVIDIA TensorRT | NVIDIA DSLA | ✓ Yes |
 | NVIDIA DALI | Apache 2.0 | ✓ Yes |
+| Apple MobileCLIP | Apple Sample Code | ✓ Yes (this file) |
+| OpenSearch | Apache 2.0 | ✓ Yes |
+| OpenCLIP | MIT | ✓ Yes |
 
 **Note:** The use of AGPL-3.0 licensed code (ultralytics fork) may impose obligations on derivative works. Consult the AGPL-3.0 license for details: https://www.gnu.org/licenses/agpl-3.0.en.html
 
@@ -157,4 +202,4 @@ For questions about attribution or licensing:
 
 ---
 
-**Last Updated:** November 2025
+**Last Updated:** December 2025

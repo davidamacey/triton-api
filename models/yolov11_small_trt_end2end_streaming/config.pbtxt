@@ -28,7 +28,7 @@ output [
   {
     name: "det_boxes"
     data_type: TYPE_FP32
-    dims: [ 100, 4 ]  # Max 100 detections, [x, y, w, h]
+    dims: [ 100, 4 ]  # Max 100 detections (model.plan not yet re-exported)
   },
   {
     name: "det_scores"
@@ -42,14 +42,10 @@ output [
   }
 ]
 
+# TRACK D: Runs on container GPU 1 (host GPU 2) for benchmark isolation from Track E (GPU 0)
 instance_group [
   {
-    count: 3  # GPU 0: TRT inference instances for streaming workload
-    kind: KIND_GPU
-    gpus: [ 0 ]
-  },
-  {
-    count: 3  # GPU 1 (host GPU 2): TRT inference instances for streaming workload
+    count: 2
     kind: KIND_GPU
     gpus: [ 1 ]
   }

@@ -4,15 +4,18 @@ Optimized image decoding and validation utilities.
 Industry best practices for fast, secure image handling in production inference APIs.
 """
 
-import numpy as np
-import cv2
+import io
 import logging
-from typing import Optional
+
+import cv2
+import numpy as np
+from PIL import Image
+
 
 logger = logging.getLogger(__name__)
 
 
-def decode_image(image_bytes: bytes, filename: str = "unknown") -> np.ndarray:
+def decode_image(image_bytes: bytes, filename: str = 'unknown') -> np.ndarray:
     """
     Decode image from bytes with robust format handling and optimal performance.
 
@@ -56,7 +59,7 @@ def decode_image(image_bytes: bytes, filename: str = "unknown") -> np.ndarray:
         >>> # img is now ready for YOLO(img) - no further prep needed!
     """
     if not image_bytes:
-        raise ValueError("Empty image data provided")
+        raise ValueError('Empty image data provided')
 
     # Fast path: OpenCV decoding (handles 95% of cases)
     # Uses optimized libjpeg-turbo, libpng, etc. via C++ backend
@@ -71,23 +74,21 @@ def decode_image(image_bytes: bytes, filename: str = "unknown") -> np.ndarray:
         if img is not None:
             # Sanity check: ensure valid dimensions
             if img.size == 0 or img.shape[0] == 0 or img.shape[1] == 0:
-                raise ValueError(f"Invalid image dimensions: {img.shape}")
+                raise ValueError(f'Invalid image dimensions: {img.shape}')
 
-            # OpenCV returns BGR format, which is what YOLO expects
+            # OpenCV returns BGR format (industry standard for cv2)
+            # Note: YOLO is trained on RGB, so conversion happens in Triton client
             return img
 
         # If cv2.imdecode returns None, format not supported - fall through to PIL
 
     except Exception as e:
         # Log warning but don't fail yet - try PIL fallback
-        logger.debug(f"OpenCV decode failed for {filename}: {e}")
+        logger.debug(f'OpenCV decode failed for {filename}: {e}')
 
     # Fallback path: PIL for exotic formats
     # Slower but handles more edge cases (WebP, animated GIF, special TIFF, etc.)
     try:
-        from PIL import Image
-        import io
-
         # Load image from bytes
         pil_image = Image.open(io.BytesIO(image_bytes))
 
@@ -113,9 +114,9 @@ def decode_image(image_bytes: bytes, filename: str = "unknown") -> np.ndarray:
 
         # Sanity check
         if img.size == 0 or img.shape[0] == 0 or img.shape[1] == 0:
-            raise ValueError(f"Invalid image dimensions: {img.shape}")
+            raise ValueError(f'Invalid image dimensions: {img.shape}')
 
-        logger.info(f"Decoded {filename} using PIL fallback (format: {pil_image.format})")
+        logger.info(f'Decoded {filename} using PIL fallback (format: {pil_image.format})')
         return img
 
     except Exception as e:
@@ -123,15 +124,12 @@ def decode_image(image_bytes: bytes, filename: str = "unknown") -> np.ndarray:
         raise ValueError(
             f"Failed to decode image '{filename}'. "
             f"Ensure it's a valid image file (JPEG, PNG, WebP, BMP, TIFF, GIF). "
-            f"Error details: {str(e)}"
-        )
+            f'Error details: {e!s}'
+        ) from e
 
 
 def validate_image(
-    img: np.ndarray,
-    filename: str = "unknown",
-    max_dimension: int = 16384,
-    min_dimension: int = 16
+    img: np.ndarray, filename: str = 'unknown', max_dimension: int = 16384, min_dimension: int = 16
 ) -> None:
     """
     Fast validation for security and early error detection.
@@ -182,20 +180,20 @@ def validate_image(
     height, width = img.shape[:2]
 
     # Security: Prevent OOM attacks from extremely large images
-    # 16K × 16K × 3 × 4 bytes = 3GB (for float32 after preprocessing)
+    # 16K x 16K x 3 x 4 bytes = 3GB (for float32 after preprocessing)
     if height > max_dimension or width > max_dimension:
         raise ValueError(
-            f"Image '{filename}' dimensions too large: {width}×{height}. "
-            f"Maximum supported: {max_dimension}×{max_dimension}. "
-            f"This limit prevents memory exhaustion attacks."
+            f"Image '{filename}' dimensions too large: {width}x{height}. "
+            f'Maximum supported: {max_dimension}x{max_dimension}. '
+            f'This limit prevents memory exhaustion attacks.'
         )
 
     # Sanity: Reject tiny images (likely corrupt or test data)
     if height < min_dimension or width < min_dimension:
         raise ValueError(
-            f"Image '{filename}' dimensions too small: {width}×{height}. "
-            f"Minimum supported: {min_dimension}×{min_dimension}. "
-            f"Check if image is corrupt or incorrectly formatted."
+            f"Image '{filename}' dimensions too small: {width}x{height}. "
+            f'Minimum supported: {min_dimension}x{min_dimension}. '
+            f'Check if image is corrupt or incorrectly formatted.'
         )
 
     # All checks passed - image is safe to process

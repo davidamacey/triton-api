@@ -3,6 +3,7 @@ fastapi
 uvicorn[standard]
 python-multipart
 orjson  # 2-3x faster JSON encoding/decoding vs stdlib json
+pydantic-settings  # Pydantic v2 settings management
 
 # YOLO and Triton
 ultralytics
@@ -36,6 +37,7 @@ scipy
 # HTTP Client
 requests
 aiohttp
+httpx
 
 # Benchmarking and Visualization
 matplotlib
@@ -47,3 +49,12 @@ tabulate
 
 # Configuration
 pyyaml
+
+# Track E: OpenSearch for Visual Search
+opensearch-py>=2.3.0  # Async OpenSearch client with k-NN support
+transformers>=4.30.0  # CLIP tokenizer for text-to-image search
+
+# Track E: MobileCLIP dependencies
+timm  # pytorch-image-models - required for MobileCLIP architecture
+huggingface_hub  # For downloading MobileCLIP checkpoints
+ftfy  # Text cleaning for CLIP tokenizer (required by open_clip)

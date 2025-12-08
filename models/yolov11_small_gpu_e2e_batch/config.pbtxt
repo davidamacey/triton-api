@@ -7,7 +7,7 @@
 #   2. YOLO TRT End2End (GPU: inference + NMS)
 #
 # Configuration tier: batch
-# - Max batch: 64 (limited by TRT End2End model)
+# - Max batch: 64
 # - Batching window: 5.0ms
 # - Preserve ordering: false
 # - Instance count: 1
@@ -40,21 +40,23 @@ output [
   {
     name: "det_boxes"
     data_type: TYPE_FP32
-    dims: [ 100, 4 ]  # [x, y, w, h] format
+    dims: [ 300, 4 ]  # XYXY format
   },
   {
     name: "det_scores"
     data_type: TYPE_FP32
-    dims: [ 100 ]
+    dims: [ 300 ]
   },
   {
     name: "det_classes"
     data_type: TYPE_INT32
-    dims: [ 100 ]
+    dims: [ 300 ]
   }
 ]
 
-# Ensemble: DALI → YOLO TRT End2End
+# Ensemble: DALI -> YOLO TRT End2End
+# Note: Ensemble models cannot have dynamic_batching alongside ensemble_scheduling.
+# Batching is configured in the child models (DALI and TRT End2End).
 ensemble_scheduling {
   step [
     {
@@ -76,7 +78,7 @@ ensemble_scheduling {
     },
     {
       # Step 2: YOLO TRT End2End (GPU inference + NMS)
-      model_name: "yolov11_small_trt_end2end_batch"
+      model_name: "yolov11_small_trt_end2end"
       model_version: -1
       input_map {
         key: "images"

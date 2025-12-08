@@ -1,164 +1,238 @@
-# Testing Guide
+# Tests Directory
 
-Comprehensive testing tools for the Triton YOLO Inference System.
+Comprehensive testing tools for the Triton YOLO Inference System with five performance tracks.
+
+---
+
+## Overview
+
+This directory contains test scripts and utilities for validating the Triton Inference Server deployment across all five performance tracks:
+
+| Track | Description | Backend |
+|-------|-------------|---------|
+| **A** | PyTorch Baseline | CPU preprocessing + CPU NMS |
+| **B** | TensorRT Standard | CPU preprocessing + CPU NMS |
+| **C** | TensorRT End2End | CPU preprocessing + GPU NMS |
+| **D** | DALI + TensorRT | GPU preprocessing + GPU NMS |
+| **E** | Visual Search | DALI + YOLO + MobileCLIP embeddings |
 
 ---
 
 ## Test Files
 
-| File | Purpose | Type |
-|------|---------|------|
-| `test_inference.sh` | **Main integration test** - Tests all 4 tracks via API | Integration |
-| `test_onnx_end2end.py` | Debug ONNX models locally (bypasses Triton) | Unit/Debug |
-| `test_end2end_patch.py` | Verify ultralytics end2end patch is applied | Validation |
-| `create_test_images.py` | Generate test images in various sizes | Utility |
+### Integration Tests
+
+| File | Purpose | Tracks Covered |
+|------|---------|----------------|
+| `test_inference.sh` | Main integration test via HTTP API | A, B, C, D |
+| `compare_tracks.py` | Compare detection outputs across all tracks | A, B, C, D, E |
+
+### Validation Tests
+
+| File | Purpose | Tracks Covered |
+|------|---------|----------------|
+| `test_end2end_patch.py` | Verify ultralytics End2End TRT NMS patch | C, D |
+| `test_onnx_end2end.py` | Debug ONNX models locally (bypasses Triton) | C |
+| `compare_padding_methods.py` | Compare DALI padding methods (center vs simple) | D |
+
+### Track E Tests
+
+| File | Purpose | Description |
+|------|---------|-------------|
+| `test_track_e_ensemble.py` | Test Track E ensemble pipeline | YOLO + MobileCLIP via Triton |
+| `test_track_e_images.py` | Test Track E image processing | Image embedding generation |
+| `test_track_e_integration.py` | Full Track E integration test | Ingest, search, index management |
+| `test_track_e_phase1_pipeline.py` | Phase 1 pipeline validation | DALI + encoder pipeline |
+| `validate_mobileclip_triton.py` | Validate MobileCLIP models | Encoder output verification |
+| `debug_track_e_dali_comparison.py` | Debug DALI vs PyTorch preprocessing | Preprocessing comparison |
+
+### Utilities
+
+| File | Purpose |
+|------|---------|
+| `create_test_images.py` | Generate test images in various sizes and aspect ratios |
+| `detection_comparison_utils.py` | Shared utilities for IoU calculation, detection matching, and metrics |
 
 ---
 
 ## Quick Start
 
-### Test All 4 Tracks
+### Prerequisites
+
+Before running tests, ensure:
+
+1. **Services are running:**
+   ```bash
+   docker compose up -d
+   # or
+   make up
+   ```
+
+2. **Check service health:**
+   ```bash
+   make status
+   # or
+   bash scripts/check_services.sh
+   ```
+
+3. **Dependencies installed:**
+   - `jq` for JSON parsing in shell scripts
+   - Python packages from `requirements.txt`
+
+### Run All Tests
 
 ```bash
-# Test all tracks with default settings (10 images each)
+# Via Makefile (recommended)
+make test-all
+
+# Direct execution
+bash tests/test_inference.sh
+```
+
+---
+
+## Running Tests
+
+### Using Makefile Targets
+
+The Makefile provides convenient targets for all test operations:
+
+| Target | Description |
+|--------|-------------|
+| `make test-inference` | Test all tracks via shell script |
+| `make test-validate-models` | Compare detections across tracks (alias for compare-tracks) |
+| `make compare-tracks` | Run compare_tracks.py with default settings |
+| `make test-shared-client` | Test shared vs per-request client performance |
+| `make test-patch` | Verify End2End TRT NMS patch is applied |
+| `make test-onnx` | Test ONNX model locally |
+| `make test-compare-padding` | Compare DALI padding methods |
+| `make test-create-images` | Generate test images (requires SOURCE param) |
+| `make test-all` | Run comprehensive test suite |
+
+**Track-specific quick tests:**
+
+| Target | Description |
+|--------|-------------|
+| `make test-track-a` | Quick test Track A (PyTorch) |
+| `make test-track-b` | Quick test Track B (TensorRT) |
+| `make test-track-c` | Quick test Track C (TRT + GPU NMS) |
+| `make test-track-d` | Quick test Track D (DALI pipeline) |
+| `make test-track-e` | Quick test Track E (Visual Search) |
+| `make test-all-tracks` | Test all tracks sequentially |
+
+### Direct Script Execution
+
+#### test_inference.sh - Main Integration Test
+
+```bash
+# Default: 10 images, small model
 bash tests/test_inference.sh
 
-# Test with custom image directory
+# Custom image directory
 bash tests/test_inference.sh /path/to/images
 
-# Test specific model size
-bash tests/test_inference.sh /path/to/images medium
-
-# Test with more images
+# Specify model size and image count
 bash tests/test_inference.sh /path/to/images small 50
 
-# Test specific Track D variant
+# Test specific Track D variant (streaming, batch, or balanced)
 bash tests/test_inference.sh /path/to/images small 10 batch
 ```
 
-**What it tests:**
-- ✅ Track A: PyTorch + CPU NMS (localhost:9600/pytorch/predict/)
-- ✅ Track B: TensorRT + CPU NMS (localhost:9600/predict/)
-- ✅ Track C: TensorRT + GPU NMS (localhost:9600/predict/*_end2end)
-- ✅ Track D: DALI + TRT + GPU NMS (localhost:9600/predict/*_gpu_e2e*)
+**Arguments:**
+- `IMAGE_DIR`: Directory containing test images (default: `./test_images`)
+- `MODEL_SIZE`: Model size - `nano`, `small`, or `medium` (default: `small`)
+- `NUM_TESTS`: Number of images to test per track (default: `10`)
+- `TRACK_D_VARIANT`: Track D variant - `streaming`, `batch`, or empty for balanced
 
-**Output:** Pass/fail for each track with latency measurements
+#### compare_tracks.py - Cross-Track Validation
 
----
-
-## Test Details
-
-### test_inference.sh - Main Integration Test
-
-**Purpose:** Comprehensive test of all 4 performance tracks via FastAPI endpoints
-
-**Usage:**
 ```bash
-bash tests/test_inference.sh [IMAGE_DIR] [MODEL_SIZE] [NUM_TESTS] [TRACK_D_VARIANT]
+# Inside container (recommended)
+docker compose exec yolo-api python /app/tests/compare_tracks.py
+
+# Test specific tracks
+docker compose exec yolo-api python /app/tests/compare_tracks.py --tracks A,C,D
+
+# Include Track E
+docker compose exec yolo-api python /app/tests/compare_tracks.py --tracks A,C,D,E
+
+# Custom IoU threshold
+docker compose exec yolo-api python /app/tests/compare_tracks.py --iou-threshold 0.7
+
+# Limit number of images
+docker compose exec yolo-api python /app/tests/compare_tracks.py --max-images 5
+
+# Save detailed results to JSON
+docker compose exec yolo-api python /app/tests/compare_tracks.py --output /app/results.json
+
+# From host (uses HTTP API)
+python tests/compare_tracks.py --host localhost --port-main 4603 --tracks A,C,E
 ```
 
 **Arguments:**
-- `IMAGE_DIR`: Directory containing test images (default: `/mnt/nvm/KILLBOY_SAMPLE_PICTURES`)
-- `MODEL_SIZE`: Model size - `nano`, `small`, or `medium` (default: `small`)
-- `NUM_TESTS`: Number of images to test per track (default: `10`)
-- `TRACK_D_VARIANT`: Track D variant - `streaming`, `batch`, or empty for balanced (default: balanced)
+- `--images`: Directory containing test images (default: `/app/test_images`)
+- `--host`: API host (default: `localhost`)
+- `--port-main`: Port for Track A/C/E (default: `4603`)
+- `--port-trackd`: Port for Track D (default: `4613`)
+- `--iou-threshold`: IoU threshold for matching (default: `0.5`)
+- `--max-images`: Maximum images to process (default: all)
+- `--tracks`: Comma-separated list of tracks (default: `A,C,D,E`)
+- `--output`: Output JSON file for detailed results
+- `--quiet`: Suppress per-image output
 
-**Examples:**
-```bash
-# Quick test (10 images)
-bash tests/test_inference.sh
+#### test_end2end_patch.py - Patch Verification
 
-# Full test (50 images)
-bash tests/test_inference.sh /mnt/nvm/KILLBOY_SAMPLE_PICTURES small 50
-
-# Test Track D batch variant
-bash tests/test_inference.sh /mnt/nvm/KILLBOY_SAMPLE_PICTURES small 10 batch
-
-# Test with nano model
-bash tests/test_inference.sh /mnt/nvm/KILLBOY_SAMPLE_PICTURES nano 10
-```
-
-**Requirements:**
-- Services running: `docker compose up -d`
-- Test images available
-- `jq` installed (for JSON parsing)
-
----
-
-### test_onnx_end2end.py - Local ONNX Debugging
-
-**Purpose:** Test ONNX End2End models locally using ONNX Runtime (bypasses Triton)
-
-**When to use:**
-- Debugging model export issues
-- Isolating model behavior from Triton serving
-- Validating ONNX model outputs before deploying to Triton
-
-**Usage:**
-```bash
-# Test with default paths
-docker compose exec yolo-api python /app/tests/test_onnx_end2end.py
-
-# Test specific image
-docker compose exec yolo-api python /app/tests/test_onnx_end2end.py /path/to/image.jpg
-
-# Test specific model
-docker compose exec yolo-api python /app/tests/test_onnx_end2end.py /path/to/image.jpg /path/to/model.onnx
-```
-
-**What it does:**
-1. Loads ONNX End2End model using ONNX Runtime
-2. Applies letterbox preprocessing (same as YOLO)
-3. Runs inference
-4. Shows raw outputs (640x640 space) and transformed outputs (original image space)
-
-**Output:**
-- Model inputs/outputs structure
-- Detection results in both padded and original coordinates
-- Useful for debugging coordinate transformation issues
-
-**Requirements:**
-- ONNX model file (`models/yolov11_small_end2end/1/model.onnx`)
-- `onnxruntime` package installed
-
----
-
-### test_end2end_patch.py - Patch Verification
-
-**Purpose:** Verify that the ultralytics end2end patch is correctly applied
-
-**When to use:**
-- After installing/updating dependencies
-- Troubleshooting Track C export issues
-- Verifying patch is active before model export
-
-**Usage:**
 ```bash
 docker compose exec yolo-api python /app/tests/test_end2end_patch.py
 ```
 
-**What it tests:**
+Verifies:
 1. Patch module imports successfully
 2. `export_onnx_trt` method exists on Exporter class
 3. TRT operators are available
-4. Can load YOLO model (if .pt file exists)
+4. Can load YOLO model (if available)
 
-**Requirements:**
-- ultralytics package installed
-- Patch applied via `src/ultralytics_patches/`
+#### test_onnx_end2end.py - Local ONNX Testing
 
----
+```bash
+# Default paths
+docker compose exec yolo-api python /app/tests/test_onnx_end2end.py
 
-### create_test_images.py - Test Image Generator
+# Custom image
+docker compose exec yolo-api python /app/tests/test_onnx_end2end.py /path/to/image.jpg
 
-**Purpose:** Generate test images in various sizes from a source image
+# Custom model and image
+docker compose exec yolo-api python /app/tests/test_onnx_end2end.py /path/to/image.jpg /path/to/model.onnx
+```
 
-**When to use:**
-- Creating test suite for DALI letterbox validation
-- Testing various aspect ratios
-- Generating consistent test data
+#### compare_padding_methods.py - DALI Padding Comparison
 
-**Usage:**
+```bash
+# Default settings
+docker compose exec yolo-api python /app/tests/compare_padding_methods.py
+
+# Custom image directory
+docker compose exec yolo-api python /app/tests/compare_padding_methods.py --images /path/to/images
+
+# Different IoU threshold
+docker compose exec yolo-api python /app/tests/compare_padding_methods.py --iou-threshold 0.7
+
+# Save results
+docker compose exec yolo-api python /app/tests/compare_padding_methods.py --output-dir /app/results
+```
+
+#### test_shared_vs_per_request.sh - Client Performance Test
+
+```bash
+bash tests/test_shared_vs_per_request.sh
+```
+
+Compares:
+- Shared gRPC client (enables batching)
+- Per-request gRPC client (no batching)
+
+#### create_test_images.py - Test Image Generator
+
 ```bash
 # Generate standard test suite (8 sizes)
 python tests/create_test_images.py --source /path/to/image.jpg
@@ -166,7 +240,7 @@ python tests/create_test_images.py --source /path/to/image.jpg
 # Custom output directory
 python tests/create_test_images.py --source image.jpg --output ./my_tests
 
-# Generate specific custom sizes
+# Generate specific sizes
 python tests/create_test_images.py --source image.jpg --sizes 640x640 1920x1080
 
 # Mix standard + custom sizes
@@ -177,106 +251,186 @@ python tests/create_test_images.py --source image.jpg --prefix test01
 ```
 
 **Standard sizes:**
-- Square: 640×640
-- Portrait 2:3: 400×600
-- Portrait 1:2: 320×640
-- Landscape 3:2: 600×400
-- Landscape 2:1: 640×320
-- Wide 16:9: 1920×1080
-- Tall 9:16: 1080×1920
-- Small: 128×128
-
-**Arguments:**
-- `--source`, `-s`: Source image file path (required)
-- `--output`, `-o`: Output directory (default: `./test_images/generated`)
-- `--sizes`: Sizes to generate - `standard` or custom like `640x480` (default: `standard`)
-- `--quality`, `-q`: JPEG quality 1-100 (default: `95`)
-- `--prefix`: Prefix for output filenames
+- Square: 640x640
+- Portrait 2:3: 400x600
+- Portrait 1:2: 320x640
+- Landscape 3:2: 600x400
+- Landscape 2:1: 640x320
+- Wide 16:9: 1920x1080
+- Tall 9:16: 1080x1920
+- Small: 128x128
 
 ---
 
-## Common Testing Workflows
+## Shared Utilities
+
+### detection_comparison_utils.py
+
+Provides shared utilities for comparing detection outputs:
+
+**Classes:**
+- `Detection`: Dataclass representing a single detection with box coordinates, confidence, and class ID
+- `ComparisonMetrics`: Dataclass containing precision, recall, F1, IoU, and other comparison metrics
+
+**Functions:**
+- `calculate_iou(box1, box2)`: Calculate IoU between two boxes
+- `calculate_iou_matrix(boxes1, boxes2)`: Calculate IoU matrix between two sets of boxes
+- `match_detections(reference, test, iou_threshold)`: Match detections using greedy IoU matching
+- `calculate_comparison_metrics(reference, test, iou_threshold)`: Calculate comprehensive metrics
+- `parse_detections(detections)`: Parse detection dictionaries to Detection objects
+- `format_metrics_table(metrics_dict)`: Format metrics as a table string
+
+**Usage Example:**
+```python
+from tests.detection_comparison_utils import (
+    parse_detections,
+    calculate_comparison_metrics,
+    format_metrics_table
+)
+
+# Parse API responses
+ref_dets = parse_detections(track_a_response['detections'])
+test_dets = parse_detections(track_c_response['detections'])
+
+# Calculate metrics
+metrics = calculate_comparison_metrics(ref_dets, test_dets, iou_threshold=0.5)
+
+print(f"F1 Score: {metrics.f1_score:.3f}")
+print(f"Mean IoU: {metrics.mean_iou:.3f}")
+```
+
+---
+
+## Track Coverage Matrix
+
+| Test File | A | B | C | D | E |
+|-----------|:-:|:-:|:-:|:-:|:-:|
+| `test_inference.sh` | Y | Y | Y | Y | - |
+| `compare_tracks.py` | Y | Y | Y | Y | Y |
+| `test_end2end_patch.py` | - | - | Y | Y | - |
+| `test_onnx_end2end.py` | - | - | Y | - | - |
+| `compare_padding_methods.py` | Y | - | - | Y | - |
+| `test_track_e_ensemble.py` | - | - | - | - | Y |
+| `test_track_e_images.py` | - | - | - | - | Y |
+| `test_track_e_integration.py` | - | - | - | - | Y |
+| `test_track_e_phase1_pipeline.py` | - | - | - | - | Y |
+| `validate_mobileclip_triton.py` | - | - | - | - | Y |
+
+---
+
+## Common Workflows
 
 ### Pre-Deployment Validation
 
 ```bash
-# 1. Verify patch is applied
-docker compose exec yolo-api python /app/tests/test_end2end_patch.py
+# 1. Start services
+make up
 
-# 2. Test ONNX models locally
-docker compose exec yolo-api python /app/tests/test_onnx_end2end.py
+# 2. Wait for services to be ready
+sleep 30
 
-# 3. Start services
-docker compose up -d
+# 3. Verify patch is applied
+make test-patch
 
-# 4. Run comprehensive integration test
-bash tests/test_inference.sh
+# 4. Test ONNX models locally
+make test-onnx
+
+# 5. Run comprehensive integration test
+make test-inference
+
+# 6. Validate cross-track consistency
+make compare-tracks
 ```
 
-### DALI Letterbox Validation
+### DALI Pipeline Validation
 
 ```bash
 # 1. Generate test images with various aspect ratios
-python tests/create_test_images.py --source /path/to/image.jpg
+make test-create-images SOURCE=/path/to/source.jpg
 
 # 2. Run DALI validation script
 docker compose exec yolo-api python /app/dali/validate_dali_letterbox.py
 
-# 3. Test Track D via API
-bash tests/test_inference.sh /path/to/images small 10
+# 3. Compare padding methods
+make test-compare-padding
+
+# 4. Test Track D via API
+bash tests/test_inference.sh test_images small 10
 ```
 
 ### Debugging Track C Issues
 
 ```bash
-# 1. Verify patch
-docker compose exec yolo-api python /app/tests/test_end2end_patch.py
+# 1. Verify patch is applied
+make test-patch
 
-# 2. Test ONNX model locally
-docker compose exec yolo-api python /app/tests/test_onnx_end2end.py
+# 2. Test ONNX model locally (bypasses Triton)
+make test-onnx
 
-# 3. Test via Triton
-bash tests/test_inference.sh /path/to/images small 5
+# 3. Test via Triton API
+make test-track-c
+
+# 4. Compare against baseline
+docker compose exec yolo-api python /app/tests/compare_tracks.py --tracks A,C --max-images 5
+```
+
+### Track E Validation
+
+```bash
+# 1. Quick test
+make test-track-e
+
+# 2. Full Track E test suite
+make test-track-e-full
+
+# 3. Run integration tests
+make test-integration
+
+# 4. Compare with detection tracks
+docker compose exec yolo-api python /app/tests/compare_tracks.py --tracks A,C,E
 ```
 
 ---
 
 ## Troubleshooting
 
-### Test Failures
+### All Tests Fail
 
-**All tracks fail:**
 ```bash
 # Check services are running
 docker compose ps
+make status
 
-# Check logs
+# Check logs for errors
 docker compose logs triton-api
-docker compose logs yolo-api
 docker compose logs yolo-api
 
 # Restart services
-docker compose restart
+make restart
 ```
 
-**Specific track fails:**
-- **Track A fails:** Check yolo-api logs
-- **Track B/C/D fail:** Check triton-api and yolo-api logs
-- **Track C fails:** Run `test_end2end_patch.py` to verify patch
-- **Track D fails:** Run DALI validation in `dali/validate_dali_letterbox.py`
+### Specific Track Fails
 
-**Missing dependencies:**
+| Track | Troubleshooting Steps |
+|-------|----------------------|
+| **A** | Check yolo-api logs, verify PyTorch models loaded |
+| **B** | Check triton-api logs, verify TRT model.plan exists |
+| **C** | Run `make test-patch`, check End2End model exists |
+| **D** | Run `make validate-dali`, check DALI pipeline |
+| **E** | Check OpenSearch status, verify MobileCLIP models |
+
+### Missing Dependencies
+
 ```bash
-# Install jq for test_inference.sh
+# Install jq for shell scripts
 sudo apt-get install jq
 
-# Install PIL for create_test_images.py (should be in requirements.txt)
-pip install Pillow
+# Install Python dependencies
+pip install -r requirements.txt
 ```
 
 ### Performance Issues
 
-If tests pass but latency is high:
 ```bash
 # Check GPU utilization
 nvidia-smi -l 1
@@ -284,10 +438,7 @@ nvidia-smi -l 1
 # Check batching is working
 docker compose logs triton-api | grep "batch size"
 
-# Check worker count (should be 33 for yolo-api)
-docker compose exec yolo-api ps aux | grep uvicorn | wc -l
-
-# Run proper benchmarks
+# Run benchmarks for accurate measurements
 cd benchmarks && ./triton_bench --mode full
 ```
 
@@ -295,47 +446,39 @@ cd benchmarks && ./triton_bench --mode full
 
 ## CI/CD Integration
 
-For automated testing:
+Example CI script:
 
 ```bash
 #!/bin/bash
-# ci-test.sh
-
 set -e
 
 echo "Starting services..."
 docker compose up -d
 
-echo "Waiting for services to be ready..."
-sleep 30
+echo "Waiting for services..."
+sleep 45
 
 echo "Running integration tests..."
-bash tests/test_inference.sh /path/to/test/images small 20
+bash tests/test_inference.sh ./test_images small 20
+
+echo "Comparing track outputs..."
+docker compose exec yolo-api python /app/tests/compare_tracks.py \
+    --tracks A,C,D \
+    --max-images 10 \
+    --quiet
 
 echo "All tests passed!"
 ```
 
 ---
 
-## Test Coverage
-
-| Component | Integration Test | Unit Test | Debug Tool |
-|-----------|-----------------|-----------|------------|
-| PyTorch API | ✅ test_inference.sh | - | - |
-| Triton TRT | ✅ test_inference.sh | - | - |
-| End2End TRT | ✅ test_inference.sh | ✅ test_onnx_end2end.py | - |
-| DALI Pipeline | ✅ test_inference.sh | ✅ dali/validate_dali_letterbox.py | - |
-| Ultralytics Patch | - | ✅ test_end2end_patch.py | - |
-
----
-
 ## Related Documentation
 
-- **[AUTOMATION.md](../AUTOMATION.md)** - Complete automation guide
-- **[dali/](../dali/)** - DALI validation scripts
-- **[benchmarks/README.md](../benchmarks/README.md)** - Performance benchmarking
-- **[docs/TESTING.md](../docs/TESTING.md)** - Testing strategy
+- **[../CLAUDE.md](../CLAUDE.md)** - Project overview and development commands
+- **[../benchmarks/README.md](../benchmarks/README.md)** - Performance benchmarking guide
+- **[../dali/README.md](../dali/README.md)** - DALI pipeline documentation
+- **[../docs/](../docs/)** - Additional documentation
 
 ---
 
-**Last Updated:** November 2025
+**Last Updated:** December 2025

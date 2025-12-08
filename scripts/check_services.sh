@@ -22,7 +22,7 @@ echo ""
 # Check Triton server
 echo "Triton Server:"
 echo "--------------"
-TRITON_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:9500/v2/health/ready 2>/dev/null)
+TRITON_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:4600/v2/health/ready 2>/dev/null)
 if [ "$TRITON_STATUS" = "200" ]; then
     echo -e "${GREEN}✓ Triton server is ready${NC}"
 
@@ -39,7 +39,7 @@ if [ "$TRITON_STATUS" = "200" ]; then
     )
 
     for MODEL in "${MODELS[@]}"; do
-        MODEL_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:9500/v2/models/$MODEL/ready" 2>/dev/null)
+        MODEL_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:4600/v2/models/$MODEL/ready" 2>/dev/null)
         if [ "$MODEL_STATUS" = "200" ]; then
             echo -e "  ${GREEN}✓${NC} $MODEL: READY"
         else
@@ -55,14 +55,15 @@ echo ""
 # Check Unified YOLO API (all tracks)
 echo "Unified YOLO API (All Tracks):"
 echo "------------------------------"
-if curl -sf http://localhost:9600/health 2>&1 | grep -q "healthy"; then
-    echo -e "${GREEN}✓ Service is healthy (Tracks A/B/C/D available)${NC}"
-    echo "  URL: http://localhost:9600"
+if curl -sf http://localhost:4603/health 2>&1 | grep -q "healthy"; then
+    echo -e "${GREEN}✓ Service is healthy (Tracks A/B/C/D/E available)${NC}"
+    echo "  URL: http://localhost:4603"
     echo ""
-    echo "  Track A: http://localhost:9600/pytorch/predict/small"
-    echo "  Track B: http://localhost:9600/predict/small"
-    echo "  Track C: http://localhost:9600/predict/small_end2end"
-    echo "  Track D: http://localhost:9600/predict/small_gpu_e2e_batch"
+    echo "  Track A: http://localhost:4603/pytorch/predict/small"
+    echo "  Track B: http://localhost:4603/predict/small"
+    echo "  Track C: http://localhost:4603/predict/small_end2end"
+    echo "  Track D: http://localhost:4603/predict/small_gpu_e2e_batch"
+    echo "  Track E: http://localhost:4603/track_e/detect"
 else
     echo -e "${RED}✗ Service is not responding${NC}"
     echo "  Check logs: docker compose logs yolo-api"
@@ -96,7 +97,7 @@ echo "  docker compose logs -f triton-api"
 echo "  docker compose logs -f yolo-api"
 echo ""
 echo "View Grafana dashboard:"
-echo "  http://localhost:3000 (admin/admin)"
+echo "  http://localhost:4605 (admin/admin)"
 echo ""
 echo "Monitor GPU:"
 echo "  nvidia-smi -l 1"

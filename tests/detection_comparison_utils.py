@@ -5,14 +5,15 @@ Utilities for comparing object detection outputs from different models/pipelines
 Includes IoU calculation, detection matching, and metrics computation.
 """
 
-import numpy as np
-from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
+
+import numpy as np
 
 
 @dataclass
 class Detection:
     """Single object detection."""
+
     x1: float
     y1: float
     x2: float
@@ -62,7 +63,7 @@ def calculate_iou(box1: np.ndarray, box2: np.ndarray) -> float:
     return intersection_area / union_area
 
 
-def calculate_iou_matrix(boxes1: List[Detection], boxes2: List[Detection]) -> np.ndarray:
+def calculate_iou_matrix(boxes1: list[Detection], boxes2: list[Detection]) -> np.ndarray:
     """
     Calculate IoU matrix between two sets of boxes.
 
@@ -86,10 +87,8 @@ def calculate_iou_matrix(boxes1: List[Detection], boxes2: List[Detection]) -> np
 
 
 def match_detections(
-    reference: List[Detection],
-    test: List[Detection],
-    iou_threshold: float = 0.5
-) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
+    reference: list[Detection], test: list[Detection], iou_threshold: float = 0.5
+) -> tuple[list[tuple[int, int]], list[int], list[int]]:
     """
     Match detections between reference and test sets using IoU.
 
@@ -148,21 +147,20 @@ def match_detections(
 @dataclass
 class ComparisonMetrics:
     """Metrics for comparing two detection sets."""
+
     num_matches: int
     num_reference: int
     num_test: int
     precision: float  # matched / test
-    recall: float     # matched / reference
+    recall: float  # matched / reference
     f1_score: float
-    mean_iou: float   # Average IoU of matched pairs
+    mean_iou: float  # Average IoU of matched pairs
     mean_conf_diff: float  # Average confidence difference
-    mean_box_diff: float   # Average L2 distance between box centers
+    mean_box_diff: float  # Average L2 distance between box centers
 
 
 def calculate_comparison_metrics(
-    reference: List[Detection],
-    test: List[Detection],
-    iou_threshold: float = 0.5
+    reference: list[Detection], test: list[Detection], iou_threshold: float = 0.5
 ) -> ComparisonMetrics:
     """
     Calculate comprehensive comparison metrics.
@@ -175,9 +173,7 @@ def calculate_comparison_metrics(
     Returns:
         ComparisonMetrics object
     """
-    matches, unmatched_ref, unmatched_test = match_detections(
-        reference, test, iou_threshold
-    )
+    matches, _unmatched_ref, _unmatched_test = match_detections(reference, test, iou_threshold)
 
     num_matches = len(matches)
     num_reference = len(reference)
@@ -207,14 +203,10 @@ def calculate_comparison_metrics(
             conf_diffs.append(conf_diff)
 
             # Box center distance
-            ref_center = np.array([
-                (ref_det.x1 + ref_det.x2) / 2,
-                (ref_det.y1 + ref_det.y2) / 2
-            ])
-            test_center = np.array([
-                (test_det.x1 + test_det.x2) / 2,
-                (test_det.y1 + test_det.y2) / 2
-            ])
+            ref_center = np.array([(ref_det.x1 + ref_det.x2) / 2, (ref_det.y1 + ref_det.y2) / 2])
+            test_center = np.array(
+                [(test_det.x1 + test_det.x2) / 2, (test_det.y1 + test_det.y2) / 2]
+            )
             box_diff = np.linalg.norm(ref_center - test_center)
             box_diffs.append(box_diff)
 
@@ -235,11 +227,11 @@ def calculate_comparison_metrics(
         f1_score=f1_score,
         mean_iou=mean_iou,
         mean_conf_diff=mean_conf_diff,
-        mean_box_diff=mean_box_diff
+        mean_box_diff=mean_box_diff,
     )
 
 
-def parse_detections(detections: List[Dict]) -> List[Detection]:
+def parse_detections(detections: list[dict]) -> list[Detection]:
     """
     Parse detection dictionaries into Detection objects.
 
@@ -256,13 +248,13 @@ def parse_detections(detections: List[Dict]) -> List[Detection]:
             x2=det['x2'],
             y2=det['y2'],
             confidence=det['confidence'],
-            class_id=det['class']
+            class_id=det['class'],
         )
         for det in detections
     ]
 
 
-def format_metrics_table(metrics_dict: Dict[str, ComparisonMetrics]) -> str:
+def format_metrics_table(metrics_dict: dict[str, ComparisonMetrics]) -> str:
     """
     Format comparison metrics as a nice table.
 
@@ -272,20 +264,20 @@ def format_metrics_table(metrics_dict: Dict[str, ComparisonMetrics]) -> str:
     Returns:
         Formatted table string
     """
-    header = f"{'Method':<30} {'Prec':<8} {'Recall':<8} {'F1':<8} {'IoU':<8} {'ConfΔ':<8} {'BoxΔ':<8} {'Match':<10}"
-    lines = [header, "=" * len(header)]
+    header = f'{"Method":<30} {"Prec":<8} {"Recall":<8} {"F1":<8} {"IoU":<8} {"ConfΔ":<8} {"BoxΔ":<8} {"Match":<10}'
+    lines = [header, '=' * len(header)]
 
     for method_name, metrics in metrics_dict.items():
         line = (
-            f"{method_name:<30} "
-            f"{metrics.precision:>7.3f} "
-            f"{metrics.recall:>7.3f} "
-            f"{metrics.f1_score:>7.3f} "
-            f"{metrics.mean_iou:>7.3f} "
-            f"{metrics.mean_conf_diff:>7.3f} "
-            f"{metrics.mean_box_diff:>7.1f} "
-            f"{metrics.num_matches:>3}/{metrics.num_reference:<3}"
+            f'{method_name:<30} '
+            f'{metrics.precision:>7.3f} '
+            f'{metrics.recall:>7.3f} '
+            f'{metrics.f1_score:>7.3f} '
+            f'{metrics.mean_iou:>7.3f} '
+            f'{metrics.mean_conf_diff:>7.3f} '
+            f'{metrics.mean_box_diff:>7.1f} '
+            f'{metrics.num_matches:>3}/{metrics.num_reference:<3}'
         )
         lines.append(line)
 
-    return "\n".join(lines)
+    return '\n'.join(lines)

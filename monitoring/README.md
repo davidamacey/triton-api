@@ -27,16 +27,16 @@ docker compose logs -f grafana
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
-| Grafana | http://localhost:3000 | admin / admin |
-| Prometheus | http://localhost:9090 | - |
-| Loki | http://localhost:3100 | - |
-| Triton Metrics | http://localhost:9502/metrics | - |
+| Grafana | http://localhost:4605 | admin / admin |
+| Prometheus | http://localhost:4604 | - |
+| Loki | http://localhost:4606 | - |
+| Triton Metrics | http://localhost:4602/metrics | - |
 
 ## Dashboard
 
 ### YOLO Triton Unified Dashboard
 
-**Auto-loaded on startup** - Available immediately at http://localhost:3000
+**Auto-loaded on startup** - Available immediately at http://localhost:4605
 
 **The all-in-one production dashboard** combining model performance, GPU resources, and system metrics.
 
@@ -104,7 +104,7 @@ Alert rules are configured in `monitoring/alerts/triton-alerts.yml`
 
 ### Viewing Active Alerts
 
-1. **Prometheus**: http://localhost:9090/alerts
+1. **Prometheus**: http://localhost:4604/alerts
 2. **Grafana**: Create alert panels in dashboards
 
 ## Logs with Loki
@@ -255,10 +255,10 @@ rate(nv_inference_request_success{model=~"yolov11.*"}[5m])
 
 ```bash
 # Check Prometheus targets
-curl http://localhost:9090/api/v1/targets
+curl http://localhost:4604/api/v1/targets
 
 # Verify Triton metrics endpoint
-curl http://localhost:9502/metrics
+curl http://localhost:4602/metrics
 ```
 
 ### Loki not receiving logs
@@ -268,7 +268,7 @@ curl http://localhost:9502/metrics
 docker compose logs promtail
 
 # Verify Loki is ready
-curl http://localhost:3100/ready
+curl http://localhost:4606/ready
 
 # Check Promtail targets
 curl http://localhost:9080/targets
@@ -285,10 +285,10 @@ curl http://localhost:9080/targets
 
 ```bash
 # Verify Prometheus is collecting metrics
-curl http://localhost:9090/api/v1/query?query=up
+curl http://localhost:4604/api/v1/query?query=up
 
 # Check if Triton is exposing metrics
-curl http://localhost:9502/metrics | grep nv_inference
+curl http://localhost:4602/metrics | grep nv_inference
 
 # Restart Grafana to reload datasources
 docker compose restart grafana
@@ -358,7 +358,7 @@ monitoring/
 
 ### Triton Inference Metrics
 
-Exposed by Triton on port 8002 (mapped to 9502):
+Exposed by Triton on port 8002 (mapped to 4602):
 
 | Metric | Description |
 |--------|-------------|
@@ -381,7 +381,7 @@ Exposed by Triton on port 8002 (mapped to 9502):
 | `nv_gpu_temperature` | GPU temperature (celsius) |
 | `nv_energy_consumption` | Total energy consumed |
 
-**View all Triton metrics:** `curl http://localhost:9502/metrics`
+**View all Triton metrics:** `curl http://localhost:4602/metrics`
 
 ### System Metrics (Node Exporter)
 

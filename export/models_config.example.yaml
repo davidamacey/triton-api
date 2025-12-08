@@ -1,0 +1,106 @@
+# Example Model Configuration File for export_models.py
+# =====================================================
+#
+# This file demonstrates how to configure multiple custom YOLO11 models
+# for export to Triton-compatible formats.
+#
+# Usage:
+#   make export-config CONFIG=/app/export/models_config.yaml
+#   # or
+#   docker compose exec yolo-api python /app/export/export_models.py \
+#       --config-file /app/export/models_config.yaml \
+#       --formats trt trt_end2end \
+#       --normalize-boxes \
+#       --save-labels \
+#       --generate-config
+#
+# Copy this file to models_config.yaml and customize for your deployment.
+
+models:
+  # Example 1: Vehicle Detection Model
+  # -----------------------------------
+  # A custom model trained to detect vehicles on roads
+  vehicle_detector:
+    # Required: Path to PyTorch model file
+    pt_file: /app/pytorch_models/vehicle_yolo11s.pt
+
+    # Optional: Custom Triton model name
+    # If not specified, auto-generated from model_id (e.g., "vehicle_detector")
+    triton_name: vehicle_detector_v1
+
+    # Optional: Maximum batch size for dynamic batching
+    # Smaller models can handle larger batches
+    # Default: 32
+    max_batch: 64
+
+    # Optional: Maximum detections per image (topk for NMS)
+    # Default: 300
+    topk: 300
+
+    # Optional: Number of classes
+    # Auto-detected from model if not specified
+    # num_classes: 5
+
+    # Optional: Class names
+    # Auto-extracted from model if not specified
+    # class_names:
+    #   - car
+    #   - truck
+    #   - bus
+    #   - motorcycle
+    #   - bicycle
+
+  # Example 2: Person Detection Model
+  # ----------------------------------
+  # A medium-sized model for person detection
+  person_detector:
+    pt_file: /app/pytorch_models/person_yolo11m.pt
+    triton_name: person_detector_v1
+    max_batch: 32  # Medium model, moderate batch size
+
+  # Example 3: Defect Detection Model
+  # ----------------------------------
+  # A small, fast model for industrial defect detection
+  defect_detector:
+    pt_file: /app/pytorch_models/defect_yolo11n.pt
+    # triton_name not specified - will auto-generate as "defect_detector"
+    max_batch: 128  # Nano model can handle large batches
+    # Custom class names for industrial defects
+    class_names:
+      - scratch
+      - dent
+      - crack
+      - corrosion
+      - missing_part
+
+  # Example 4: General Purpose (Using Built-in Size)
+  # ------------------------------------------------
+  # If you want to export a standard YOLO11 model with custom config
+  # Note: This is better done with --models flag, but shown for completeness
+  yolo11_custom_small:
+    pt_file: /app/pytorch_models/yolo11s.pt
+    triton_name: yolov11_small_custom
+    max_batch: 64
+
+# Configuration Tips:
+# -------------------
+# 1. max_batch guidelines by model size:
+#    - nano:   64-128 (smallest, most memory efficient)
+#    - small:  32-64
+#    - medium: 16-32
+#    - large:  8-16
+#    - xlarge: 4-8 (largest, most memory intensive)
+#
+# 2. Class names are auto-extracted from models trained with Ultralytics.
+#    Only specify class_names if you need to override.
+#
+# 3. Models are exported in the order listed. If one fails, subsequent
+#    models will still be attempted.
+#
+# 4. Output directory structure:
+#    models/
+#    └── {triton_name}_trt_end2end/
+#        ├── 1/
+#        │   └── model.plan
+#        ├── config.pbtxt
+#        └── labels.txt

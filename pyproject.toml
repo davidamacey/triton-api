@@ -1,0 +1,300 @@
+# Triton API - Python Project Configuration
+# Configuration for ruff (linter + formatter) and project metadata
+
+[project]
+name = "triton-api"
+version = "5.0.0"
+description = "High-performance YOLO inference API with NVIDIA Triton and multiple performance tracks"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    {name = "Triton API Team"}
+]
+license = {text = "MIT"}
+
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+]
+
+keywords = ["yolo", "triton", "tensorrt", "object-detection", "fastapi", "inference"]
+
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "orjson",
+    "pydantic-settings",
+    "ultralytics",
+    "tritonclient[all]",
+    "onnx>=1.12.0,<=1.19.1",
+    "onnxslim>=0.1.71",
+    "onnxsim>=0.4.33",
+    "onnxscript",
+    "onnxruntime-gpu",
+    "onnx-graphsurgeon",
+    "tensorrt-cu12==10.13.3.9",
+    "nvidia-dali-cuda120",
+    "torch",
+    "torchvision",
+    "opencv-python",
+    "numpy",
+    "scipy",
+    "requests",
+    "aiohttp",
+    "matplotlib",
+    "seaborn",
+    "pandas",
+    "psutil",
+    "tqdm",
+    "tabulate",
+    "pyyaml",
+    "opensearch-py>=2.3.0",
+    "transformers>=4.30.0",
+    "timm",
+    "huggingface_hub",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=4.0.0",
+    "ruff>=0.8.4",
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# =============================================================================
+# Ruff Configuration (Linter + Formatter)
+# =============================================================================
+
+[tool.ruff]
+# Target Python 3.12
+target-version = "py312"
+
+# Line length (industry standard: 88-100, we use 100)
+line-length = 100
+
+# Directories to include/exclude
+include = ["src/**/*.py", "export/**/*.py", "dali/**/*.py", "scripts/**/*.py", "tests/**/*.py"]
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "reference_repos",
+    "pytorch_models",
+    "models",
+    "cache",
+    "benchmarks/results",
+    "*.egg-info",
+]
+
+# =============================================================================
+# Ruff Linter Rules
+# =============================================================================
+
+[tool.ruff.lint]
+# Enable rule categories (industry standard set)
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort (import sorting)
+    "N",     # pep8-naming
+    "UP",    # pyupgrade (modernize Python code)
+    "B",     # flake8-bugbear (detect common bugs)
+    "A",     # flake8-builtins (shadowing builtins)
+    "C4",    # flake8-comprehensions (better list/dict comprehensions)
+    "DTZ",   # flake8-datetimez (timezone-aware datetime)
+    "T10",   # flake8-debugger (no breakpoints in production)
+    "EM",    # flake8-errmsg (better error messages)
+    "ISC",   # flake8-implicit-str-concat
+    "ICN",   # flake8-import-conventions
+    "PIE",   # flake8-pie (misc lints)
+    "PT",    # flake8-pytest-style
+    "Q",     # flake8-quotes (enforce quote style)
+    "RSE",   # flake8-raise (better exception raising)
+    "RET",   # flake8-return (better return statements)
+    "SIM",   # flake8-simplify (simplify code)
+    "TID",   # flake8-tidy-imports
+    "TCH",   # flake8-type-checking (optimize TYPE_CHECKING imports)
+    "ARG",   # flake8-unused-arguments
+    "PTH",   # flake8-use-pathlib (prefer pathlib over os.path)
+    "ERA",   # eradicate (remove commented-out code)
+    "PL",    # pylint
+    "PERF",  # perflint (performance anti-patterns)
+    "RUF",   # ruff-specific rules
+]
+
+# Rules to ignore (with justification)
+ignore = [
+    "E501",    # Line too long (handled by formatter)
+    "PLC0415", # Import should be at top-level (lazy imports for heavy deps)
+    "PLR0913", # Too many arguments (common in ML code)
+    "PLR0912", # Too many branches (common in validation logic)
+    "PLR0915", # Too many statements (common in setup functions)
+    "PLR2004", # Magic value comparison (common with thresholds)
+    "N803",    # Argument name should be lowercase (allow numpy-style names)
+    "N806",    # Variable should be lowercase (allow numpy-style names)
+    "DTZ005",  # datetime.now() without tz (not critical for logs)
+    "EM101",   # Exception must not use string literal (too strict)
+    "EM102",   # Exception must not use f-string (too strict)
+    "TRY003",  # Avoid long messages in exception (too strict)
+    "SIM108",  # Use ternary operator (readability preference)
+    "PTH123",  # pathlib open() vs builtin open() (performance reasons)
+    "RUF012",  # Mutable class attributes (common in Pydantic)
+]
+
+# Allow autofix for all enabled rules
+fixable = ["ALL"]
+unfixable = []
+
+# Allow unused variables when prefixed with underscore
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.per-file-ignores]
+# Test files can have additional flexibility
+"tests/**/*.py" = [
+    "ARG001",  # Unused function argument (fixtures)
+    "S101",    # Use of assert
+    "PLR2004", # Magic values
+    "PT028",   # Default arguments in test-like functions (standalone test scripts, not pytest)
+    "RUF001",  # Ambiguous Unicode characters (intentional for display)
+]
+
+# Scripts can be less strict
+"scripts/**/*.py" = [
+    "T201",    # print() allowed in scripts
+    "PLR2004", # Magic values
+    "PT028",   # Default arguments in test-named functions (these are scripts, not pytest tests)
+]
+
+# DALI pipeline scripts are not pytest tests despite test_* naming
+"dali/**/*.py" = [
+    "PT028",   # Default arguments in test-like functions (standalone validation scripts)
+    "ARG001",  # Unused function argument (kept for interface consistency)
+    "ERA001",  # Commented-out code (documentation comments describing matrix format)
+    "RUF022",  # Unsorted __all__ (intentionally grouped by category)
+]
+
+# FastAPI routers use dependency injection in default arguments (standard pattern)
+"src/routers/**/*.py" = [
+    "B008",    # Function call in default argument (FastAPI File(), Depends(), Query())
+]
+
+# Utils package has documentation comments explaining import structure
+"src/utils/__init__.py" = [
+    "ERA001",  # Commented-out code (import documentation for circular dependency prevention)
+]
+
+# Ultralytics patches are third-party code
+"src/ultralytics_patches/**/*.py" = [
+    "ALL",     # Disable all linting for third-party patches
+]
+
+[tool.ruff.lint.isort]
+# Import sorting configuration (follows black/blue style)
+force-single-line = false
+lines-after-imports = 2
+known-first-party = ["src"]
+known-third-party = ["ultralytics", "tritonclient", "fastapi", "pydantic"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+
+# Combine 'from' imports from the same module
+combine-as-imports = true
+split-on-trailing-comma = false
+
+[tool.ruff.lint.flake8-quotes]
+# Use single quotes (blue style, more compact)
+inline-quotes = "single"
+multiline-quotes = "double"
+docstring-quotes = "double"
+
+[tool.ruff.lint.pydocstyle]
+# Use Google-style docstrings
+convention = "google"
+
+[tool.ruff.lint.pylint]
+# Pylint-specific settings
+max-args = 10
+max-branches = 15
+max-returns = 8
+max-statements = 60
+
+# =============================================================================
+# Ruff Formatter Configuration
+# =============================================================================
+
+[tool.ruff.format]
+# Use single quotes (blue style)
+quote-style = "single"
+
+# Indent with spaces
+indent-style = "space"
+
+# Respect existing line endings
+line-ending = "auto"
+
+# Enable magic trailing comma (helps with git diffs)
+skip-magic-trailing-comma = false
+
+# Docstring formatting
+docstring-code-format = true
+docstring-code-line-length = 88
+
+# =============================================================================
+# Pytest Configuration
+# =============================================================================
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "--cov=src",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+]
+
+# =============================================================================
+# Coverage Configuration
+# =============================================================================
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+    "src/ultralytics_patches/*",  # Third-party code
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]

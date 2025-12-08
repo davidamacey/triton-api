@@ -1,323 +1,256 @@
-# DALI Preprocessing Pipeline
+# DALI Preprocessing Pipelines
 
-This folder contains scripts for creating and validating GPU-accelerated YOLO preprocessing pipelines using NVIDIA DALI (Data Loading Library).
+GPU-accelerated preprocessing pipelines using NVIDIA DALI for Triton Inference Server.
 
 ## Overview
 
-**NVIDIA DALI** is a GPU-accelerated library for data loading and preprocessing. It enables:
-- GPU-accelerated JPEG decoding (nvJPEG)
-- GPU-based image transformations
-- Optimized data pipelines for inference
-- Integration with NVIDIA Triton Inference Server
+This folder contains scripts for creating, validating, and managing DALI preprocessing pipelines that provide significant performance improvements over CPU-based preprocessing:
 
-This implementation provides **Track D** performance optimization: Full GPU pipeline with DALI preprocessing + TensorRT inference + GPU NMS.
+| Track | Pipeline | Speedup | Use Case |
+|-------|----------|---------|----------|
+| **D** | YOLO letterbox only | 10-15x | High-throughput object detection |
+| **E Full** | YOLO + CLIP + HD cropping | 8-12x | Visual search with per-object embeddings |
+| **E Simple** | YOLO + CLIP only | 10-15x | Fast visual search (global embeddings only) |
 
 ## Architecture
 
-### Current Implementation (Affine Transformation)
+### Track D: YOLO Preprocessing
 
 ```
-Client → [Triton Ensemble] → Detections
-         ├─ DALI Preprocessing (GPU)
-         │  ├─ nvJPEG decode (GPU)
-         │  ├─ warp_affine with CPU-calculated matrix (GPU)
-         │  └─ Normalize + HWC→CHW (GPU)
-         └─ YOLO TRT End2End (GPU)
-            ├─ TensorRT inference (GPU)
-            └─ EfficientNMS (GPU)
+Client                    Triton Ensemble                    Output
+  │                            │                               │
+  ├─ JPEG bytes ──────────────>│                               │
+  ├─ affine_matrices ─────────>│                               │
+  │                            │                               │
+  │                      DALI Pipeline (GPU)                   │
+  │                      ├─ nvJPEG decode                      │
+  │                      ├─ warp_affine (letterbox)            │
+  │                      └─ normalize + CHW                    │
+  │                            │                               │
+  │                      YOLO TRT End2End (GPU)                │
+  │                      ├─ TensorRT inference                 │
+  │                      └─ EfficientNMS                       │
+  │                            │                               │
+  │<────────── detections ─────┘                               │
 ```
 
-**CPU Overhead**: Client calculates affine transformation matrix (~0.5-1ms)
-**GPU Pipeline**: Decode → Transform → Normalize → Inference → NMS
+### Track E: Dual/Triple-Branch Preprocessing
+
+```
+encoded_jpeg
+     │
+     ▼
+nvJPEG Decode (GPU)
+     │
+┌────┴────────────┬────────────┐
+▼                 ▼            ▼
+YOLO Branch    CLIP Branch   HD Branch (full only)
+640x640        256x256       max 1920px
+letterbox      center crop   preserve aspect
+     │              │             │
+     ▼              ▼             ▼
+[yolo_images]  [clip_images]  [original_images]
+```
 
 ## Files
 
-### 1. create_dali_letterbox_pipeline.py
+### Configuration
 
-**Purpose**: Creates and serializes the DALI preprocessing pipeline for Triton deployment.
+| File | Description |
+|------|-------------|
+| `config.py` | Shared constants and configuration dataclasses |
+| `utils.py` | Utility functions (affine calculation, test helpers) |
+| `__init__.py` | Package exports |
 
-**What it does**:
-- Defines a DALI pipeline with letterbox preprocessing using affine transformations
-- Builds and serializes the pipeline to `models/yolo_preprocess_dali/1/model.dali`
-- Generates a Triton `config.pbtxt` for the DALI backend
-- Tests the pipeline with dummy data to verify correctness
+### Pipeline Creation Scripts
 
-**Pipeline operations**:
-1. Decode JPEG using nvJPEG (GPU-accelerated)
-2. Apply affine transformation via `warp_affine` (GPU)
-3. Normalize to [0, 1] and convert HWC → CHW (GPU)
+| File | Track | Output Model | Description |
+|------|-------|--------------|-------------|
+| `create_dali_letterbox_pipeline.py` | D | `yolo_preprocess_dali` | YOLO letterbox preprocessing |
+| `create_dual_dali_pipeline.py` | E Full | `dual_preprocess_dali` | Triple-branch (YOLO + CLIP + HD) |
+| `create_yolo_clip_dali_pipeline.py` | E Simple | `yolo_clip_preprocess_dali` | Dual-branch (YOLO + CLIP) |
+| `create_ensembles.py` | D | `yolov11_*_gpu_e2e_*` | Ensemble configs for 3 tiers |
 
-**Usage**:
+### Validation Scripts
+
+| File | Track | Description |
+|------|-------|-------------|
+| `validate_dali_letterbox.py` | D | Tests DALI pipeline standalone and via Triton |
+| `validate_dual_dali_preprocessing.py` | E | Compares DALI vs PyTorch reference |
+
+## Quick Start
+
+### Track D Setup
+
 ```bash
-# Run from yolo-api container (has DALI installed)
-docker compose exec yolo-api python /app/dali/create_dali_letterbox_pipeline.py
+# Create DALI pipeline and ensembles
+make create-dali
+
+# Validate
+make validate-dali
 ```
 
-**Inputs**:
-- `encoded_images`: Raw JPEG/PNG bytes (variable length)
-- `affine_matrices`: Pre-calculated affine transformation matrices [N, 2, 3] FP32
+### Track E Setup
 
-**Output**:
-- `preprocessed_images`: [N, 3, 640, 640] FP32 tensor, normalized [0, 1]
-
-**Key configuration**:
-- Batch size: 128 (matches Triton ensemble configs)
-- Device: GPU 0
-- Threads: 4 (for CPU orchestration)
-- Instance count: 1 (NVIDIA best practice for DALI)
-
----
-
-### 2. create_ensembles.py
-
-**Purpose**: Generates three-tier ensemble model configurations that chain DALI preprocessing with YOLO TRT End2End models.
-
-**What it does**:
-- Creates ensemble `config.pbtxt` files for different workload patterns
-- Supports multiple YOLO model sizes (nano, small, medium)
-- Optimizes dynamic batching parameters per tier
-- Sets up proper input/output mappings between DALI and TRT models
-
-**Three ensemble tiers**:
-
-| Tier | Use Case | Max Batch | Batching Window | Preserve Order | Instance Count |
-|------|----------|-----------|-----------------|----------------|----------------|
-| **Streaming** | Real-time video | 8 | 0.1ms | ✓ | 3 |
-| **Balanced** | General purpose | 64 | 0.5ms | ✗ | 2 |
-| **Batch** | Offline processing | 128 | 5ms | ✗ | 1 |
-
-**Ensemble naming convention**:
-- `yolov11_small_gpu_e2e_streaming` → Real-time streaming (0.1ms batching)
-- `yolov11_small_gpu_e2e` → General purpose (0.5ms batching)
-- `yolov11_small_gpu_e2e_batch` → Offline batch (5ms batching)
-
-**Usage**:
 ```bash
-# Create ensembles for specific model sizes
-python dali/create_ensembles.py --models small
-python dali/create_ensembles.py --models nano small medium
+# Create triple-branch pipeline (with HD cropping for per-object embeddings)
+make create-dali-dual
 
-# Create ensembles for all sizes
-python dali/create_ensembles.py --models all
+# Or create simple dual-branch pipeline (faster, global embeddings only)
+make create-dali-simple
+
+# Validate
+make validate-dali-dual
 ```
 
-**Generated output**:
-```
-models/
-├── yolov11_small_gpu_e2e/
-│   ├── 1/  (empty for ensemble)
-│   └── config.pbtxt
-├── yolov11_small_gpu_e2e_streaming/
-└── yolov11_small_gpu_e2e_batch/
-```
+## Makefile Targets
 
----
+| Target | Description |
+|--------|-------------|
+| `make create-dali` | Create Track D pipeline + ensembles + restart Triton |
+| `make create-ensembles` | Create Track D ensemble configs only |
+| `make create-dali-dual` | Create Track E triple-branch pipeline |
+| `make create-dali-simple` | Create Track E dual-branch pipeline (faster) |
+| `make rebuild-dali` | Rebuild Track E pipeline (alias for create-dali-dual) |
+| `make validate-dali` | Validate Track D pipeline |
+| `make validate-dali-dual` | Validate Track E pipeline vs PyTorch |
 
-### 3. validate_dali_letterbox.py
+## Configuration
 
-**Purpose**: Validates the DALI pipeline and ensemble models through comprehensive testing.
-
-**What it does**:
-- Tests DALI pipeline in standalone mode (deserialized from `model.dali`)
-- Tests DALI model serving through Triton gRPC API
-- Tests full ensemble pipeline (DALI + TRT End2End)
-- Validates output shapes, dtypes, and value ranges
-- Confirms affine transformation calculations
-
-**Three validation tests**:
-
-1. **Test 1: DALI Standalone Pipeline**
-   - Deserializes `model.dali` and runs it directly
-   - Feeds test image JPEG bytes + affine matrix
-   - Validates output format: (3, 640, 640) FP32 [0, 1]
-
-2. **Test 2: DALI Model via Triton**
-   - Calls `yolo_preprocess_dali` model through Triton gRPC
-   - Tests Triton serving of DALI backend
-   - Validates preprocessing output
-
-3. **Test 3: Full Ensemble (Track D)**
-   - Calls `yolov11_small_gpu_e2e` ensemble
-   - Tests complete pipeline: DALI → TRT → NMS
-   - Validates detection outputs (boxes, scores, classes)
-
-**Usage**:
-```bash
-# Run from yolo-api container
-docker compose exec yolo-api python /app/dali/validate_dali_letterbox.py
-```
-
-**Prerequisites**:
-- DALI pipeline must be created first
-- Triton server must be running
-- Test image at `/app/test_images/bus.jpg`
-
-## Workflow
-
-### Initial Setup
-
-1. **Create DALI pipeline**:
-   ```bash
-   docker compose exec yolo-api python /app/dali/create_dali_letterbox_pipeline.py
-   ```
-   This generates:
-   - `models/yolo_preprocess_dali/1/model.dali`
-   - `models/yolo_preprocess_dali/config.pbtxt`
-
-2. **Create ensemble models**:
-   ```bash
-   docker compose exec yolo-api python /app/dali/create_ensembles.py --models small
-   ```
-   This generates ensemble configs like:
-   - `models/yolov11_small_gpu_e2e/config.pbtxt`
-   - `models/yolov11_small_gpu_e2e_streaming/config.pbtxt`
-   - `models/yolov11_small_gpu_e2e_batch/config.pbtxt`
-
-3. **Restart Triton to load new models**:
-   ```bash
-   docker compose restart triton-api
-   ```
-
-4. **Validate the pipeline**:
-   ```bash
-   docker compose exec yolo-api python /app/dali/validate_dali_letterbox.py
-   ```
-
-### Making Changes
-
-If you modify the DALI pipeline:
-1. Re-run `create_dali_letterbox_pipeline.py`
-2. Restart Triton
-3. Re-validate with `validate_dali_letterbox.py`
-
-If you modify ensemble configurations:
-1. Re-run `create_ensembles.py`
-2. Restart Triton
-3. Test with inference scripts or benchmarks
-
-## Key Implementation Details
-
-### Affine Transformation Matrix
-
-The current implementation requires CPU calculation of letterbox affine matrices:
+All configuration is centralized in `config.py`:
 
 ```python
-def calculate_letterbox_affine(orig_w, orig_h, target_size=640):
-    scale = min(target_size / orig_h, target_size / orig_w)
-    if scale > 1.0:
-        scale = 1.0
+# Image sizes
+YOLO_SIZE = 640          # YOLO input size
+CLIP_SIZE = 256          # MobileCLIP input size
+YOLO_PAD_VALUE = 114     # Gray padding color
 
-    new_h = int(round(orig_h * scale))
-    new_w = int(round(orig_w * scale))
+# Pipeline settings
+MAX_BATCH_SIZE = 128     # Maximum batch size
+NUM_THREADS = 4          # CPU threads for orchestration
+HW_DECODER_LOAD = 0.65   # Hardware decoder offload (Ampere+)
 
-    pad_x = (target_size - new_w) / 2.0
-    pad_y = (target_size - new_h) / 2.0
-
-    # Affine matrix format: [[scale_x, 0, offset_x], [0, scale_y, offset_y]]
-    affine_matrix = np.array([
-        [scale, 0.0, pad_x],
-        [0.0, scale, pad_y]
-    ], dtype=np.float32)
-
-    return affine_matrix
+# Performance targets
+CORRECTNESS_THRESHOLD = 0.01   # Max acceptable mean diff
+PERFORMANCE_TARGET_MS = 5.0    # Target preprocessing latency
 ```
 
-**CPU overhead**: ~0.5-1.0ms per image for matrix calculation
-**Trade-off**: Simpler implementation vs. pure GPU pipeline
+## Ensemble Tiers (Track D)
 
-### DALI Best Practices
+Three tiers optimize for different workloads:
 
-From NVIDIA documentation and testing:
+| Tier | Suffix | Batching | Instances | Use Case |
+|------|--------|----------|-----------|----------|
+| **Streaming** | `_gpu_e2e_streaming` | 0.1ms | 3 | Real-time video |
+| **Balanced** | `_gpu_e2e` | 0.5ms | 2 | General purpose |
+| **Batch** | `_gpu_e2e_batch` | 5ms | 1 | Offline processing |
 
-1. **Instance count = 1**: Multiple DALI instances cause unnaturally high memory usage
-2. **device="mixed"**: Use for image decoder (CPU decode → GPU output via nvJPEG)
-3. **hw_decoder_load=0.65**: Optimal for Ampere+ hardware decoder offload
-4. **Batch size**: Match to Triton ensemble max_batch_size (typically 128)
+## Output Formats
 
-### Ensemble Configuration
+### Track D (`yolo_preprocess_dali`)
 
-Ensembles combine models without copying data:
-- Input: Raw JPEG bytes
-- Step 1: DALI preprocessing → `preprocessed_images`
-- Step 2: TRT End2End uses `preprocessed_images` → detections
-- Output: Detections (boxes, scores, classes)
+| Output | Shape | Type | Range |
+|--------|-------|------|-------|
+| `preprocessed_images` | `[N, 3, 640, 640]` | FP32 | [0, 1] |
 
-All data stays on GPU between steps (zero-copy).
+### Track E Triple-Branch (`dual_preprocess_dali`)
+
+| Output | Shape | Type | Description |
+|--------|-------|------|-------------|
+| `yolo_images` | `[N, 3, 640, 640]` | FP32 | Letterboxed for detection |
+| `clip_images` | `[N, 3, 256, 256]` | FP32 | Center-cropped for embedding |
+| `original_images` | `[N, 3, H, W]` | FP32 | HD (max 1920px) for cropping |
+
+### Track E Dual-Branch (`yolo_clip_preprocess_dali`)
+
+| Output | Shape | Type | Description |
+|--------|-------|------|-------------|
+| `yolo_images` | `[N, 3, 640, 640]` | FP32 | Letterboxed for detection |
+| `clip_images` | `[N, 3, 256, 256]` | FP32 | Center-cropped for embedding |
+
+## Affine Matrix Calculation
+
+All pipelines require CPU-calculated affine transformation matrices:
+
+```python
+from dali.utils import calculate_letterbox_affine
+
+# Get affine matrix for letterbox transformation
+affine_matrix, scale, pad_x, pad_y = calculate_letterbox_affine(
+    orig_w=1920,
+    orig_h=1080,
+    target_size=640,
+)
+# affine_matrix shape: [2, 3]
+# Format: [[scale_x, 0, offset_x], [0, scale_y, offset_y]]
+```
+
+**CPU overhead**: ~0.5-1.0ms per image (negligible for batch processing).
 
 ## Performance Characteristics
 
-### Track D (DALI + TRT End2End)
+### Latency (single image)
 
-**Advantages**:
-- GPU-accelerated JPEG decoding (nvJPEG)
-- GPU-based image transformations
-- No CPU→GPU data transfer for preprocessing
-- Optimized batch processing
+| Component | Latency |
+|-----------|---------|
+| Affine calculation (CPU) | ~0.5-1.0ms |
+| nvJPEG decode (GPU) | ~0.5-1.0ms |
+| warp_affine (GPU) | ~0.2ms |
+| Normalize + transpose (GPU) | ~0.1ms |
+| **Total preprocessing** | **~1.5-2.5ms** |
 
-**CPU overhead**:
-- Affine matrix calculation: ~0.5-1.0ms per image
-- Negligible for batch processing (calculated once per image)
+### Throughput (batch=128)
 
-**GPU pipeline** (fully pipelined):
-- nvJPEG decode: ~0.5-1ms
-- warp_affine: ~0.2ms
-- Normalize + transpose: ~0.1ms
-- TensorRT inference: ~2-5ms (model dependent)
-- EfficientNMS: ~0.3ms
-
-**Total latency** (batch=1): ~3-7ms (vs. 5-10ms for CPU preprocessing)
-**Throughput** (batch=128): ~10-20x faster than CPU preprocessing
-
-## Testing
-
-### Quick validation:
-```bash
-docker compose exec yolo-api python /app/dali/validate_dali_letterbox.py
-```
-
-### Benchmark comparisons:
-```bash
-# Compare all tracks (Track A/B/C/D)
-python benchmarks/four_track_comparison.py --image test_images/bus.jpg
-
-# Compare ensemble tiers
-python benchmarks/compare_ensemble_tiers.py
-```
+| Track | Images/sec | vs CPU |
+|-------|------------|--------|
+| D (YOLO only) | 3000-5000 | 10-15x |
+| E Full (triple-branch) | 2000-3500 | 8-12x |
+| E Simple (dual-branch) | 3000-4500 | 10-14x |
 
 ## Troubleshooting
 
 ### "DALI not installed" error
-Run scripts from the **yolo-api** container (not triton-api):
+
+Run scripts from the **yolo-api** container:
+
 ```bash
 docker compose exec yolo-api python /app/dali/<script>.py
 ```
 
 ### "Model not ready" error
-Ensure Triton has loaded the models:
+
+Check Triton has loaded the models:
+
 ```bash
 docker compose exec triton-api curl localhost:8000/v2/models/yolo_preprocess_dali
 ```
 
 ### "Test image not found" error
-Make sure test images exist:
+
+Ensure test images exist:
+
 ```bash
 docker compose exec yolo-api ls /app/test_images/
 ```
+
+### Validation failure
+
+If DALI outputs don't match PyTorch reference:
+
+1. Check image format (RGB vs BGR)
+2. Verify affine matrix calculation
+3. Check normalization (should be /255 for both)
+4. Run with verbose: `python script.py -v`
+
+## NVIDIA Best Practices
+
+1. **Instance count = 1**: Multiple DALI instances cause high memory usage
+2. **device="mixed"**: Use for image decoder (CPU decode -> GPU output via nvJPEG)
+3. **hw_decoder_load=0.65**: Optimal for Ampere+ hardware decoder offload
+4. **Batch size**: Match to Triton ensemble max_batch_size (typically 128)
 
 ## References
 
 - [NVIDIA DALI Documentation](https://docs.nvidia.com/deeplearning/dali/user-guide/docs/)
 - [Triton DALI Backend](https://github.com/triton-inference-server/dali_backend)
-- [YOLO Letterbox Preprocessing](https://docs.ultralytics.com/modes/predict/#image-and-video-formats)
-- [Track D Implementation Details](../ATTRIBUTION.md)
-
-## Future Improvements
-
-Potential optimizations (not yet implemented):
-
-1. **Pure GPU letterbox**: Calculate transformation matrix on GPU using DALI custom operators
-2. **DALI resize+pad**: Use native DALI ops instead of affine transformation
-3. **Batched matrix calculation**: Calculate affine matrices in parallel on GPU
-4. **Adaptive batching**: Dynamic batch size based on image size distribution
-
-These would eliminate the ~0.5-1ms CPU overhead per image.
+- [YOLO Letterbox Preprocessing](https://docs.ultralytics.com/modes/predict/)

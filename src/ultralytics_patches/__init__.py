@@ -54,4 +54,4 @@ if AUTO_APPLY:
     try:
         apply_end2end_patch()
     except ImportError:
-        print("⚠️  Ultralytics not installed yet, patch will be applied when you import YOLO")
+        print('⚠️  Ultralytics not installed yet, patch will be applied when you import YOLO')

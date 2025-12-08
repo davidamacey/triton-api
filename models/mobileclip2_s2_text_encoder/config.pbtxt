@@ -1,0 +1,48 @@
+# MobileCLIP2-S2 Text Encoder - TensorRT
+# Converts tokenized text to 512-dim L2-normalized embeddings
+#
+# Input: [B, 77] INT64 token IDs
+# Output: [B, 512] FP32, L2-normalized
+
+name: "mobileclip2_s2_text_encoder"
+platform: "tensorrt_plan"
+max_batch_size: 64
+
+input [
+  {
+    name: "text_tokens"
+    data_type: TYPE_INT64
+    dims: [ 77 ]
+  }
+]
+
+output [
+  {
+    name: "text_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 512 ]
+  }
+]
+
+# Dynamic batching
+dynamic_batching {
+  preferred_batch_size: [ 4, 8, 16 ]
+  max_queue_delay_microseconds: 5000
+  preserve_ordering: false
+
+  # Queue policy to prevent server deadlock under high load
+  default_queue_policy {
+    timeout_action: REJECT
+    default_timeout_microseconds: 5000000  # 5 seconds - text encoding is fast
+    allow_timeout_override: false
+    max_queue_size: 128  # Reject excess requests gracefully (HTTP 503)
+  }
+}
+
+instance_group [
+  {
+    count: 4
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]

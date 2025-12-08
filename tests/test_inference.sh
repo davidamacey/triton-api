@@ -1,6 +1,6 @@
 #!/bin/bash
 # Comprehensive Inference Test Script
-# Tests all 4 performance tracks with sample images
+# Tests all 5 performance tracks with sample images
 
 # Note: Not using 'set -e' to allow tracking partial successes across all tracks
 
@@ -19,15 +19,15 @@ NUM_TESTS=${3:-10}
 TRACK_D_VARIANT=${4:-""}  # Optional: streaming, batch, or empty for balanced
 
 echo "============================================================"
-echo "Comprehensive Inference Testing - All 4 Tracks"
+echo "Comprehensive Inference Testing - All 5 Tracks"
 echo "============================================================"
 echo "Image directory: $IMAGE_DIR"
 echo "Model size: $MODEL_SIZE"
 echo "Number of tests per track: $NUM_TESTS"
 echo ""
 
-# Find test images
-TEST_IMAGES=($(find "$IMAGE_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) | head -$NUM_TESTS))
+# Find test images (using mapfile for safer array handling)
+mapfile -t TEST_IMAGES < <(find "$IMAGE_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) | head -n "$NUM_TESTS")
 
 if [ ${#TEST_IMAGES[@]} -eq 0 ]; then
     echo -e "${RED}✗ No images found in $IMAGE_DIR${NC}"
@@ -54,7 +54,7 @@ test_endpoint() {
     local total_time=0
 
     for IMG in "${TEST_IMAGES[@]}"; do
-        echo -n "  Testing $(basename $IMG)... "
+        echo -n "  Testing $(basename "$IMG")... "
 
         # Time the request
         START_TIME=$(date +%s%N)
@@ -99,6 +99,7 @@ TRACK_A_SUCCESS=0
 TRACK_B_SUCCESS=0
 TRACK_C_SUCCESS=0
 TRACK_D_SUCCESS=0
+TRACK_E_SUCCESS=0
 
 # Track A: PyTorch (baseline)
 test_endpoint "Track A" \
@@ -133,6 +134,12 @@ else
     TRACK_D_SUCCESS=$?
 fi
 
+# Track E: Visual Search (YOLO + MobileCLIP embeddings)
+test_endpoint "Track E" \
+    "http://localhost:9600/track_e/detect" \
+    "YOLO + MobileCLIP Visual Search"
+TRACK_E_SUCCESS=$?
+
 # Final Summary
 echo "============================================================"
 echo "FINAL SUMMARY"
@@ -165,20 +172,27 @@ else
     TRACK_D_COLOR=$YELLOW
 fi
 
+if [ $TRACK_E_SUCCESS -eq ${#TEST_IMAGES[@]} ]; then
+    TRACK_E_COLOR=$GREEN
+else
+    TRACK_E_COLOR=$YELLOW
+fi
+
 echo -e "${TRACK_A_COLOR}Track A (PyTorch):${NC}        $TRACK_A_SUCCESS/${#TEST_IMAGES[@]} passed"
 echo -e "${TRACK_B_COLOR}Track B (TRT):${NC}            $TRACK_B_SUCCESS/${#TEST_IMAGES[@]} passed"
 echo -e "${TRACK_C_COLOR}Track C (TRT End2End):${NC}    $TRACK_C_SUCCESS/${#TEST_IMAGES[@]} passed"
 echo -e "${TRACK_D_COLOR}Track D (DALI + TRT):${NC}     $TRACK_D_SUCCESS/${#TEST_IMAGES[@]} passed"
+echo -e "${TRACK_E_COLOR}Track E (Visual Search):${NC}  $TRACK_E_SUCCESS/${#TEST_IMAGES[@]} passed"
 echo ""
 
 # Overall status
-TOTAL_PASS=$((TRACK_A_SUCCESS + TRACK_B_SUCCESS + TRACK_C_SUCCESS + TRACK_D_SUCCESS))
-TOTAL_POSSIBLE=$((${#TEST_IMAGES[@]} * 4))
+TOTAL_PASS=$((TRACK_A_SUCCESS + TRACK_B_SUCCESS + TRACK_C_SUCCESS + TRACK_D_SUCCESS + TRACK_E_SUCCESS))
+TOTAL_POSSIBLE=$((${#TEST_IMAGES[@]} * 5))
 
 if [ $TOTAL_PASS -eq $TOTAL_POSSIBLE ]; then
     echo -e "${GREEN}✓ ALL TESTS PASSED!${NC} ($TOTAL_PASS/$TOTAL_POSSIBLE)"
     echo ""
-    echo "All 4 tracks are working correctly!"
+    echo "All 5 tracks are working correctly!"
     exit 0
 elif [ $TOTAL_PASS -gt 0 ]; then
     echo -e "${YELLOW}⚠ PARTIAL SUCCESS${NC} ($TOTAL_PASS/$TOTAL_POSSIBLE tests passed)"

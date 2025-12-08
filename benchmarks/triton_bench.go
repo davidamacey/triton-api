@@ -1,3 +1,4 @@
+// Package main provides a high-performance benchmark tool for Triton Inference Server.
 package main
 
 import (
@@ -11,13 +12,17 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-const version = "1.0.0"
+const (
+	version  = "1.0.0"
+	trackAll = "all"
+)
 
 // Track represents an inference track
 type Track struct {
@@ -38,25 +43,28 @@ const (
 	ModeAllImages
 	ModeThroughputSustained
 	ModeVariableLoad
+	ModeMatrix // NEW: Run tests across multiple concurrency levels
 )
 
 // BenchmarkConfig holds all configuration
 type BenchmarkConfig struct {
-	Mode            TestMode
-	ImageDir        string
-	ImageLimit      int
-	Clients         int
-	Duration        int
-	Warmup          int
-	TrackFilter     string
-	OutputFile      string
-	Quiet           bool
-	JSONOutput      bool
-	LoadPattern     string // "constant", "burst", "ramp"
-	BurstInterval   int    // seconds between bursts
-	RampStep        int    // client increment for ramp
-	EnableResize    bool   // enable pre-resize in FastAPI
-	MaxSize         int    // max dimension for resize
+	Mode          TestMode
+	ImageDir      string
+	ImageLimit    int
+	Clients       int
+	Duration      int
+	Warmup        int
+	TrackFilter   string
+	OutputFile    string
+	Quiet         bool
+	JSONOutput    bool
+	LoadPattern   string // "constant", "burst", "ramp"
+	BurstInterval int    // seconds between bursts
+	RampStep      int    // client increment for ramp
+	EnableResize  bool   // enable pre-resize in FastAPI
+	MaxSize       int    // max dimension for resize
+	Port          int    // API port (default 4603, use 4613 for Track D benchmark)
+	MatrixClients string // comma-separated list of client counts for matrix mode
 }
 
 // BenchmarkResults holds results for a single track
@@ -80,39 +88,43 @@ type BenchmarkResults struct {
 // DetectionResponse from API
 type DetectionResponse struct {
 	Detections []map[string]interface{} `json:"detections"`
-	Status     string                    `json:"status"`
+	Status     string                   `json:"status"`
 }
 
 // All available tracks
 var allTracks = []Track{
-	{ID: "A", Name: "PyTorch Baseline", URL: "http://localhost:9600/pytorch/predict/small", Description: "Native PyTorch + CPU NMS"},
-	{ID: "B", Name: "Triton Standard TRT", URL: "http://localhost:9600/predict/small", Description: "TensorRT + CPU NMS"},
-	{ID: "C", Name: "Triton End2End TRT", URL: "http://localhost:9600/predict/small_end2end", Description: "TensorRT + GPU NMS"},
-	{ID: "D_streaming", Name: "DALI+TRT Streaming", URL: "http://localhost:9600/predict/small_gpu_e2e_streaming", Description: "Full GPU (low latency)"},
-	{ID: "D_balanced", Name: "DALI+TRT Balanced", URL: "http://localhost:9600/predict/small_gpu_e2e", Description: "Full GPU (balanced)"},
-	{ID: "D_batch", Name: "DALI+TRT Batch", URL: "http://localhost:9600/predict/small_gpu_e2e_batch", Description: "Full GPU (max throughput)"},
+	{ID: "A", Name: "PyTorch Baseline", URL: "http://localhost:4603/pytorch/predict/small", Description: "Native PyTorch + CPU NMS"},
+	{ID: "B", Name: "Triton Standard TRT", URL: "http://localhost:4603/predict/small", Description: "TensorRT + CPU NMS"},
+	{ID: "C", Name: "Triton End2End TRT", URL: "http://localhost:4603/predict/small_end2end", Description: "TensorRT + GPU NMS"},
+	{ID: "D_streaming", Name: "DALI+TRT Streaming", URL: "http://localhost:4603/predict/small_gpu_e2e_streaming", Description: "Full GPU (low latency)"},
+	{ID: "D_balanced", Name: "DALI+TRT Balanced", URL: "http://localhost:4603/predict/small_gpu_e2e", Description: "Full GPU (balanced)"},
+	{ID: "D_batch", Name: "DALI+TRT Batch", URL: "http://localhost:4603/predict/small_gpu_e2e_batch", Description: "Full GPU (max throughput)"},
+	{ID: "E", Name: "DALI+YOLO+CLIP (simple)", URL: "http://localhost:4603/track_e/predict", Description: "YOLO + global embedding (ensemble)"},
+	{ID: "E_full", Name: "DALI+YOLO+CLIP (full)", URL: "http://localhost:4603/track_e/predict_full", Description: "YOLO + global + per-box embeddings"},
 }
 
 func main() {
 	// Define flags
 	var (
-		mode            = flag.String("mode", "quick", "Test mode: single, set, quick, full, all, sustained, variable")
-		imageDir        = flag.String("images", "/mnt/nvm/KILLBOY_SAMPLE_PICTURES", "Directory containing test images")
-		imageLimit      = flag.Int("limit", 100, "Maximum number of images to load")
-		clients         = flag.Int("clients", 64, "Number of concurrent clients")
-		duration        = flag.Int("duration", 60, "Test duration in seconds")
-		warmup          = flag.Int("warmup", 10, "Number of warmup requests per track")
-		track           = flag.String("track", "all", "Track filter (A, B, C, D_streaming, D_balanced, D_batch, or all)")
-		output          = flag.String("output", "benchmarks/results/benchmark_results.json", "Output JSON file")
-		quiet           = flag.Bool("quiet", false, "Quiet mode (minimal output)")
-		jsonOut         = flag.Bool("json", false, "JSON output only")
-		loadPattern     = flag.String("load-pattern", "constant", "Load pattern: constant, burst, ramp")
-		burstInterval   = flag.Int("burst-interval", 10, "Seconds between bursts (for burst mode)")
-		rampStep        = flag.Int("ramp-step", 16, "Client increment for ramp mode")
-		enableResize    = flag.Bool("resize", false, "Enable pre-resize for large images (recommended for 5MP+ images)")
-		maxSize         = flag.Int("max-size", 1024, "Maximum dimension for resize (640-4096)")
-		showVersion     = flag.Bool("version", false, "Show version and exit")
-		listModes       = flag.Bool("list-modes", false, "List all available test modes")
+		mode          = flag.String("mode", "quick", "Test mode: single, set, quick, full, all, sustained, variable")
+		imageDir      = flag.String("images", "/mnt/nvm/KILLBOY_SAMPLE_PICTURES", "Directory containing test images")
+		imageLimit    = flag.Int("limit", 100, "Maximum number of images to load")
+		clients       = flag.Int("clients", 64, "Number of concurrent clients")
+		duration      = flag.Int("duration", 60, "Test duration in seconds")
+		warmup        = flag.Int("warmup", 10, "Number of warmup requests per track")
+		track         = flag.String("track", "all", "Track filter (A, B, C, D_streaming, D_balanced, D_batch, E, E_full, or all)")
+		output        = flag.String("output", "results/benchmark_results.json", "Output JSON file")
+		quiet         = flag.Bool("quiet", false, "Quiet mode (minimal output)")
+		jsonOut       = flag.Bool("json", false, "JSON output only")
+		loadPattern   = flag.String("load-pattern", "constant", "Load pattern: constant, burst, ramp")
+		burstInterval = flag.Int("burst-interval", 10, "Seconds between bursts (for burst mode)")
+		rampStep      = flag.Int("ramp-step", 16, "Client increment for ramp mode")
+		enableResize  = flag.Bool("resize", false, "Enable pre-resize for large images (recommended for 5MP+ images)")
+		maxSize       = flag.Int("max-size", 1024, "Maximum dimension for resize (640-4096)")
+		port          = flag.Int("port", 4603, "API port (4603=Track E, 4613=Track D benchmark)")
+		matrixClients = flag.String("matrix-clients", "32,64,128,256,512,1024", "Comma-separated client counts for matrix mode")
+		showVersion   = flag.Bool("version", false, "Show version and exit")
+		listModes     = flag.Bool("list-modes", false, "List all available test modes")
 	)
 
 	flag.Parse()
@@ -154,6 +166,8 @@ func main() {
 		RampStep:      *rampStep,
 		EnableResize:  *enableResize,
 		MaxSize:       *maxSize,
+		Port:          *port,
+		MatrixClients: *matrixClients,
 	}
 
 	// Run benchmark
@@ -173,6 +187,7 @@ func printModes() {
 	fmt.Println("  all          Process all images in directory with concurrency")
 	fmt.Println("  sustained    Max throughput sustainment test")
 	fmt.Println("  variable     Variable load pattern test (use --load-pattern)")
+	fmt.Println("  matrix       Run tests across multiple concurrency levels (use --matrix-clients)")
 	fmt.Println()
 	fmt.Println("Load Patterns (for variable mode):")
 	fmt.Println("  constant     Steady load throughout test")
@@ -184,6 +199,7 @@ func printModes() {
 	fmt.Println("  triton_bench --mode quick --track D_batch")
 	fmt.Println("  triton_bench --mode full --clients 256 --duration 120")
 	fmt.Println("  triton_bench --mode variable --load-pattern ramp --ramp-step 32")
+	fmt.Println("  triton_bench --mode matrix --track D_batch --matrix-clients 32,64,128,256,512 --duration 30")
 }
 
 func parseMode(mode string) (TestMode, error) {
@@ -196,12 +212,14 @@ func parseMode(mode string) (TestMode, error) {
 		return ModeQuickConcurrency, nil
 	case "full":
 		return ModeFullConcurrency, nil
-	case "all":
+	case trackAll:
 		return ModeAllImages, nil
 	case "sustained":
 		return ModeThroughputSustained, nil
 	case "variable":
 		return ModeVariableLoad, nil
+	case "matrix":
+		return ModeMatrix, nil
 	default:
 		return 0, fmt.Errorf("invalid mode: %s", mode)
 	}
@@ -222,8 +240,8 @@ func runBenchmark(config *BenchmarkConfig) error {
 		fmt.Printf("✓ Loaded %d images from %s\n\n", len(images), config.ImageDir)
 	}
 
-	// Filter tracks
-	tracks := filterTracks(config.TrackFilter)
+	// Filter tracks (applies custom port if specified)
+	tracks := filterTracks(config.TrackFilter, config.Port)
 
 	// Check availability
 	available := checkAvailability(tracks, config.Quiet)
@@ -232,31 +250,36 @@ func runBenchmark(config *BenchmarkConfig) error {
 	}
 
 	// Run tests based on mode
-	var results []*BenchmarkResults
-
-	switch config.Mode {
-	case ModeSingleImage:
-		results, err = testSingleImage(available, images, config)
-	case ModeImageSet:
-		results, err = testImageSet(available, images, config)
-	case ModeQuickConcurrency:
-		results, err = testQuickConcurrency(available, images, config)
-	case ModeFullConcurrency:
-		results, err = testFullConcurrency(available, images, config)
-	case ModeAllImages:
-		results, err = testAllImages(available, images, config)
-	case ModeThroughputSustained:
-		results, err = testSustained(available, images, config)
-	case ModeVariableLoad:
-		results, err = testVariableLoad(available, images, config)
-	}
-
+	results, err := runTestMode(available, images, config)
 	if err != nil {
 		return err
 	}
 
 	// Output results
 	return outputResults(results, config)
+}
+
+func runTestMode(available []Track, images [][]byte, config *BenchmarkConfig) ([]*BenchmarkResults, error) {
+	switch config.Mode {
+	case ModeSingleImage:
+		return testSingleImage(available, images, config)
+	case ModeImageSet:
+		return testImageSet(available, images, config)
+	case ModeQuickConcurrency:
+		return testQuickConcurrency(available, images, config)
+	case ModeFullConcurrency:
+		return testFullConcurrency(available, images, config)
+	case ModeAllImages:
+		return testAllImages(available, images, config)
+	case ModeThroughputSustained:
+		return testSustained(available, images, config)
+	case ModeVariableLoad:
+		return testVariableLoad(available, images, config)
+	case ModeMatrix:
+		return testMatrix(available, images, config)
+	default:
+		return nil, fmt.Errorf("unknown test mode: %v", config.Mode)
+	}
 }
 
 func testSingleImage(tracks []Track, images [][]byte, config *BenchmarkConfig) ([]*BenchmarkResults, error) {
@@ -266,7 +289,7 @@ func testSingleImage(tracks []Track, images [][]byte, config *BenchmarkConfig) (
 		fmt.Println(strings.Repeat("=", 80))
 	}
 
-	var results []*BenchmarkResults
+	results := make([]*BenchmarkResults, 0, len(tracks))
 	client := createHTTPClient(1)
 
 	for _, track := range tracks {
@@ -308,7 +331,7 @@ func testImageSet(tracks []Track, images [][]byte, config *BenchmarkConfig) ([]*
 		fmt.Println(strings.Repeat("=", 80))
 	}
 
-	var results []*BenchmarkResults
+	results := make([]*BenchmarkResults, 0, len(tracks))
 	client := createHTTPClient(1)
 
 	for _, track := range tracks {
@@ -362,7 +385,7 @@ func testQuickConcurrency(tracks []Track, images [][]byte, config *BenchmarkConf
 		fmt.Println(strings.Repeat("=", 80))
 	}
 
-	var results []*BenchmarkResults
+	results := make([]*BenchmarkResults, 0, len(tracks))
 
 	for _, track := range tracks {
 		if !config.Quiet {
@@ -396,7 +419,7 @@ func testFullConcurrency(tracks []Track, images [][]byte, config *BenchmarkConfi
 		fmt.Println(strings.Repeat("=", 80))
 	}
 
-	var results []*BenchmarkResults
+	results := make([]*BenchmarkResults, 0, len(tracks))
 
 	for _, track := range tracks {
 		if !config.Quiet {
@@ -433,7 +456,7 @@ func testAllImages(tracks []Track, images [][]byte, config *BenchmarkConfig) ([]
 		fmt.Println(strings.Repeat("=", 80))
 	}
 
-	var results []*BenchmarkResults
+	results := make([]*BenchmarkResults, 0, len(tracks))
 
 	for _, track := range tracks {
 		if !config.Quiet {
@@ -467,7 +490,7 @@ func testSustained(tracks []Track, images [][]byte, config *BenchmarkConfig) ([]
 		fmt.Println(strings.Repeat("=", 80))
 	}
 
-	var results []*BenchmarkResults
+	results := make([]*BenchmarkResults, 0, len(tracks))
 
 	for _, track := range tracks {
 		if !config.Quiet {
@@ -505,7 +528,7 @@ func testVariableLoad(tracks []Track, images [][]byte, config *BenchmarkConfig) 
 		fmt.Println(strings.Repeat("=", 80))
 	}
 
-	var results []*BenchmarkResults
+	results := make([]*BenchmarkResults, 0, len(tracks))
 
 	for _, track := range tracks {
 		if !config.Quiet {
@@ -530,6 +553,100 @@ func testVariableLoad(tracks []Track, images [][]byte, config *BenchmarkConfig) 
 			fmt.Printf("  Throughput: %.2f req/sec\n", result.Throughput)
 			fmt.Printf("  Mean latency: %.2fms\n", result.MeanLatency)
 			fmt.Printf("  P95 latency: %.2fms\n", result.P95Latency)
+		}
+	}
+
+	return results, nil
+}
+
+// MatrixResult holds results for a single concurrency level in matrix mode
+type MatrixResult struct {
+	Clients     int
+	Throughput  float64
+	MeanLatency float64
+	P95Latency  float64
+	P99Latency  float64
+	Success     float64
+}
+
+func testMatrix(tracks []Track, images [][]byte, config *BenchmarkConfig) ([]*BenchmarkResults, error) {
+	// Parse client counts from comma-separated string
+	clientStrs := strings.Split(config.MatrixClients, ",")
+	var clientCounts []int
+	for _, s := range clientStrs {
+		s = strings.TrimSpace(s)
+		if count, err := strconv.Atoi(s); err == nil && count > 0 {
+			clientCounts = append(clientCounts, count)
+		}
+	}
+
+	if len(clientCounts) == 0 {
+		return nil, fmt.Errorf("no valid client counts in matrix-clients: %s", config.MatrixClients)
+	}
+
+	if !config.Quiet {
+		fmt.Printf("Test Mode: Matrix Benchmark\n")
+		fmt.Printf("Testing across %d concurrency levels: %v\n", len(clientCounts), clientCounts)
+		fmt.Printf("Duration per level: %d seconds\n", config.Duration)
+		fmt.Println(strings.Repeat("=", 80))
+	}
+
+	var results []*BenchmarkResults
+
+	for _, track := range tracks {
+		if !config.Quiet {
+			fmt.Printf("\nTrack %s: %s\n", track.ID, track.Name)
+			fmt.Println(strings.Repeat("-", 80))
+			fmt.Printf("%-10s | %-12s | %-12s | %-12s | %-12s | %-10s\n",
+				"Clients", "Throughput", "Mean (ms)", "P95 (ms)", "P99 (ms)", "Success")
+			fmt.Println(strings.Repeat("-", 80))
+		}
+
+		// Warmup once before matrix
+		if config.Warmup > 0 {
+			runWarmup(track, images, config.Warmup, true, config)
+		}
+
+		var matrixResults []MatrixResult
+
+		for _, clients := range clientCounts {
+			// Run concurrent test for this client count
+			result := runConcurrentTest(track, images, clients, config.Duration, fmt.Sprintf("matrix_%d", clients), config)
+
+			successRate := float64(result.SuccessRequests) / float64(result.TotalRequests) * 100
+
+			matrixResults = append(matrixResults, MatrixResult{
+				Clients:     clients,
+				Throughput:  result.Throughput,
+				MeanLatency: result.MeanLatency,
+				P95Latency:  result.P95Latency,
+				P99Latency:  result.P99Latency,
+				Success:     successRate,
+			})
+
+			if !config.Quiet {
+				fmt.Printf("%-10d | %-12.1f | %-12.2f | %-12.2f | %-12.2f | %-10.1f%%\n",
+					clients, result.Throughput, result.MeanLatency, result.P95Latency, result.P99Latency, successRate)
+			}
+
+			// Append each result separately with client count in track ID
+			result.TrackID = fmt.Sprintf("%s@%d", track.ID, clients)
+			results = append(results, result)
+		}
+
+		// Print summary for this track
+		if !config.Quiet {
+			fmt.Println(strings.Repeat("-", 80))
+			// Find peak throughput
+			var peakTP float64
+			var peakClients int
+			for _, mr := range matrixResults {
+				if mr.Throughput > peakTP {
+					peakTP = mr.Throughput
+					peakClients = mr.Clients
+				}
+			}
+			fmt.Printf("Peak throughput: %.1f req/sec @ %d clients\n", peakTP, peakClients)
 		}
 	}
 
@@ -731,11 +848,11 @@ func sendSingleRequest(client *http.Client, url string, imageData []byte, config
 		return 0, false
 	}
 
-	if _, err := part.Write(imageData); err != nil {
+	if _, writeErr := part.Write(imageData); writeErr != nil {
 		return 0, false
 	}
 
-	if err := writer.Close(); err != nil {
+	if closeErr := writer.Close(); closeErr != nil {
 		return 0, false
 	}
 
@@ -759,7 +876,7 @@ func sendSingleRequest(client *http.Client, url string, imageData []byte, config
 	if err != nil {
 		return 0, false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		return 0, false
@@ -792,7 +909,7 @@ func runWarmup(track Track, images [][]byte, count int, quiet bool, config *Benc
 }
 
 func loadImages(dir string, limit int) ([][]byte, error) {
-	var images [][]byte
+	images := make([][]byte, 0, limit)
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -829,19 +946,27 @@ func loadImages(dir string, limit int) ([][]byte, error) {
 	return images, nil
 }
 
-func filterTracks(filter string) []Track {
-	if filter == "all" {
-		return allTracks
-	}
-
-	var filtered []Track
-	for _, track := range allTracks {
-		if track.ID == filter {
-			filtered = append(filtered, track)
+func filterTracks(filter string, port int) []Track {
+	var tracks []Track
+	if filter == trackAll {
+		tracks = make([]Track, len(allTracks))
+		copy(tracks, allTracks)
+	} else {
+		for _, track := range allTracks {
+			if track.ID == filter {
+				tracks = append(tracks, track)
+			}
 		}
 	}
 
-	return filtered
+	// Apply custom port if specified (non-default)
+	if port != 4603 {
+		for i := range tracks {
+			tracks[i].URL = strings.Replace(tracks[i].URL, ":4603/", fmt.Sprintf(":%d/", port), 1)
+		}
+	}
+
+	return tracks
 }
 
 func checkAvailability(tracks []Track, quiet bool) []Track {
@@ -861,7 +986,7 @@ func checkAvailability(tracks []Track, quiet bool) []Track {
 			if !quiet {
 				fmt.Printf("  ✓ Track %s: %s\n", track.ID, track.Name)
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		} else {
 			if !quiet {
 				fmt.Printf("  ✗ Track %s: %s (unavailable)\n", track.ID, track.Name)
@@ -953,6 +1078,18 @@ func outputResults(results []*BenchmarkResults, config *BenchmarkConfig) error {
 	}
 
 	printResultsTable(results)
+
+	// Fetch and display Triton model statistics (skip for Track A which is PyTorch only)
+	if config.TrackFilter != "A" {
+		tritonURL := getTritonBaseURL(config.Port)
+		stats, err := fetchTritonStats(tritonURL)
+		if err != nil {
+			fmt.Printf("\n⚠ Could not fetch Triton stats: %v\n", err)
+		} else {
+			printTritonStats(stats, config.TrackFilter)
+		}
+	}
+
 	return saveJSON(results, config.OutputFile)
 }
 
@@ -1024,6 +1161,17 @@ func saveJSON(results []*BenchmarkResults, filename string) error {
 		return err
 	}
 
+	// Generate timestamped filename
+	// Extract base name and extension
+	ext := filepath.Ext(filename)
+	baseName := filename[:len(filename)-len(ext)]
+
+	// Create timestamp in format: 2025-12-07_143045
+	timestamp := time.Now().Format("2006-01-02_150405")
+
+	// Build timestamped filename: results/benchmark_2025-12-07_143045.json
+	timestampedFilename := fmt.Sprintf("%s_%s%s", baseName, timestamp, ext)
+
 	data, err := json.MarshalIndent(map[string]interface{}{
 		"timestamp": time.Now().Format(time.RFC3339),
 		"results":   results,
@@ -1033,11 +1181,18 @@ func saveJSON(results []*BenchmarkResults, filename string) error {
 		return err
 	}
 
+	// Save timestamped version
+	if err := os.WriteFile(timestampedFilename, data, 0644); err != nil {
+		return err
+	}
+
+	// Also save to default filename (latest)
 	if err := os.WriteFile(filename, data, 0644); err != nil {
 		return err
 	}
 
-	fmt.Printf("\n✓ Results saved to: %s\n", filename)
+	fmt.Printf("\n✓ Results saved to: %s\n", timestampedFilename)
+	fmt.Printf("✓ Latest results:   %s\n", filename)
 	return nil
 }
 
@@ -1060,7 +1215,7 @@ func printHeader(config *BenchmarkConfig) {
 	if config.Mode != ModeSingleImage && config.Mode != ModeImageSet {
 		fmt.Printf("Duration: %d seconds\n", config.Duration)
 	}
-	if config.TrackFilter != "all" {
+	if config.TrackFilter != trackAll {
 		fmt.Printf("Track filter: %s\n", config.TrackFilter)
 	}
 	fmt.Println(strings.Repeat("=", 120))
@@ -1086,4 +1241,194 @@ func getModeString(mode TestMode) string {
 	default:
 		return "Unknown"
 	}
+}
+
+// =============================================================================
+// Triton Model Statistics
+// =============================================================================
+
+// TritonStatsResponse represents the response from /v2/models/stats
+type TritonStatsResponse struct {
+	ModelStats []ModelStats `json:"model_stats"`
+}
+
+// ModelStats represents stats for a single model
+type ModelStats struct {
+	Name           string         `json:"name"`
+	Version        string         `json:"version"`
+	InferenceStats InferenceStats `json:"inference_stats"`
+	BatchStats     []BatchStats   `json:"batch_stats"`
+}
+
+// InferenceStats holds timing information
+type InferenceStats struct {
+	Success       StatMetric `json:"success"`
+	Queue         StatMetric `json:"queue"`
+	ComputeInfer  StatMetric `json:"compute_infer"`
+	ComputeInput  StatMetric `json:"compute_input"`
+	ComputeOutput StatMetric `json:"compute_output"`
+}
+
+// StatMetric holds count and nanoseconds
+type StatMetric struct {
+	Count int64 `json:"count"`
+	Ns    int64 `json:"ns"`
+}
+
+// BatchStats holds batch size distribution
+type BatchStats struct {
+	BatchSize    int        `json:"batch_size"`
+	ComputeInfer StatMetric `json:"compute_infer"`
+}
+
+// fetchTritonStats fetches model statistics from Triton server
+func fetchTritonStats(tritonURL string) (*TritonStatsResponse, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	resp, err := client.Get(tritonURL + "/v2/models/stats")
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch stats: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("stats endpoint returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %v", err)
+	}
+
+	var stats TritonStatsResponse
+	if err := json.Unmarshal(body, &stats); err != nil {
+		return nil, fmt.Errorf("failed to parse stats JSON: %v", err)
+	}
+
+	return &stats, nil
+}
+
+// printTritonStats displays Triton model statistics in a formatted table
+func printTritonStats(stats *TritonStatsResponse, trackFilter string) {
+	fmt.Println()
+	fmt.Println(strings.Repeat("=", 120))
+	fmt.Println("TRITON MODEL STATISTICS")
+	fmt.Println(strings.Repeat("=", 120))
+
+	// Filter models based on track
+	relevantModels := filterRelevantModels(stats.ModelStats, trackFilter)
+
+	if len(relevantModels) == 0 {
+		fmt.Println("No model statistics available")
+		return
+	}
+
+	for _, model := range relevantModels {
+		if model.InferenceStats.Success.Count == 0 {
+			continue
+		}
+
+		count := model.InferenceStats.Success.Count
+		totalNs := model.InferenceStats.Success.Ns
+		queueNs := model.InferenceStats.Queue.Ns
+		computeNs := model.InferenceStats.ComputeInfer.Ns
+
+		avgMs := float64(totalNs) / float64(count) / 1e6
+		queueMs := float64(queueNs) / float64(count) / 1e6
+		computeMs := float64(computeNs) / float64(count) / 1e6
+
+		fmt.Printf("\n%s:\n", model.Name)
+		fmt.Printf("  Inferences: %d\n", count)
+		fmt.Printf("  Avg total: %.2fms (queue: %.2fms, compute: %.2fms)\n", avgMs, queueMs, computeMs)
+		fmt.Printf("  Total queue time: %.1fs, Total compute: %.1fs\n", float64(queueNs)/1e9, float64(computeNs)/1e9)
+
+		// Batch distribution
+		if len(model.BatchStats) > 0 {
+			fmt.Println("  Batch distribution:")
+
+			var totalSamples int64
+			var totalExecutions int64
+
+			// Sort batch stats by batch size
+			sortedBatches := make([]BatchStats, len(model.BatchStats))
+			copy(sortedBatches, model.BatchStats)
+			sort.Slice(sortedBatches, func(i, j int) bool {
+				return sortedBatches[i].BatchSize < sortedBatches[j].BatchSize
+			})
+
+			for _, b := range sortedBatches {
+				if b.ComputeInfer.Count > 0 {
+					samples := int64(b.BatchSize) * b.ComputeInfer.Count
+					totalSamples += samples
+					totalExecutions += b.ComputeInfer.Count
+					fmt.Printf("    batch=%d: %d executions (%d samples)\n",
+						b.BatchSize, b.ComputeInfer.Count, samples)
+				}
+			}
+
+			if totalExecutions > 0 {
+				avgBatch := float64(totalSamples) / float64(totalExecutions)
+				fmt.Printf("  Average batch size: %.2f\n", avgBatch)
+			}
+		}
+	}
+
+	fmt.Println()
+}
+
+// filterRelevantModels filters models based on track
+func filterRelevantModels(models []ModelStats, trackFilter string) []ModelStats {
+	var relevant []ModelStats
+
+	// Define model prefixes for each track
+	trackPrefixes := map[string][]string{
+		"A":           {}, // PyTorch - no Triton models
+		"B":           {"yolov11_small_trt"},
+		"C":           {"yolov11_small_trt_end2end"},
+		"D_streaming": {"yolo_preprocess_dali_streaming", "yolov11_small_trt_end2end_streaming", "yolov11_small_gpu_e2e_streaming"},
+		"D_balanced":  {"yolo_preprocess_dali", "yolov11_small_trt_end2end", "yolov11_small_gpu_e2e"},
+		"D_batch":     {"yolo_preprocess_dali_batch", "yolov11_small_trt_end2end_batch", "yolov11_small_gpu_e2e_batch"},
+		"E":           {"yolo_clip_preprocess_dali", "yolov11_small_trt_end2end", "mobileclip", "yolo_clip_ensemble"},
+		"E_full":      {"yolo_clip_preprocess_dali", "yolov11_small_trt_end2end", "mobileclip", "box_embedding", "yolo_mobileclip_ensemble"},
+	}
+
+	// Get prefixes for the current track
+	prefixes, ok := trackPrefixes[trackFilter]
+	if !ok || trackFilter == trackAll {
+		// Return all models with activity
+		for _, m := range models {
+			if m.InferenceStats.Success.Count > 0 {
+				relevant = append(relevant, m)
+			}
+		}
+		return relevant
+	}
+
+	// Filter by prefix
+	for _, m := range models {
+		if m.InferenceStats.Success.Count == 0 {
+			continue
+		}
+
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(m.Name, prefix) {
+				relevant = append(relevant, m)
+				break
+			}
+		}
+	}
+
+	return relevant
+}
+
+// getTritonBaseURL extracts Triton base URL from track URL
+func getTritonBaseURL(port int) string {
+	// Map API port to Triton HTTP port
+	// 4603 (yolo-api) -> 4600 (triton-api)
+	// 4613 (yolo-api-trackd) -> 4610 (triton-api-trackd)
+	tritonPort := 4600
+	if port == 4613 {
+		tritonPort = 4610
+	}
+	return fmt.Sprintf("http://localhost:%d", tritonPort)
 }
