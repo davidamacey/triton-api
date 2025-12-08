@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a high-performance deployment system for NVIDIA Triton Inference Server running Ultralytics YOLO models (YOLOv11) with a unified FastAPI service providing **four performance tracks** achieving up to **15x speedup** through GPU optimization, DALI preprocessing, and TensorRT acceleration.
+This is a high-performance deployment system for NVIDIA Triton Inference Server running Ultralytics YOLO models (YOLOv11) with a unified FastAPI service providing **five performance tracks** achieving up to **15x speedup** through GPU optimization, DALI preprocessing, TensorRT acceleration, and visual search via MobileCLIP embeddings.
 
 ## Architecture
 
@@ -13,19 +13,24 @@ This is a high-performance deployment system for NVIDIA Triton Inference Server 
 The system uses Docker Compose to orchestrate services with a **unified API architecture**:
 
 1. **triton-api**: NVIDIA Triton Inference Server
-   - Runs on GPU (device_ids: [`0`])
-   - Exposes ports 9500 (HTTP), 9501 (gRPC), 9502 (metrics)
+   - Runs on GPU (device_ids: [`0`, `2`])
+   - Exposes ports 4600 (HTTP), 4601 (gRPC), 4602 (metrics)
    - Serves TensorRT models with dynamic batching
-   - Loads 6 models: Track B (standard TRT), Track C (TRT End2End), Track D (DALI + 3 ensemble variants)
+   - Loads models for all tracks: Track B (TRT), Track C (TRT End2End), Track D (DALI ensemble), Track E (MobileCLIP + embeddings)
 
-2. **yolo-api**: Unified FastAPI service (ALL FOUR TRACKS)
+2. **yolo-api**: Unified FastAPI service (ALL FIVE TRACKS)
    - Python 3.12 container with Ultralytics SDK
-   - Exposes port **9600** for ALL tracks
-   - 32 workers × 512 concurrent requests = **16,384 total capacity**
-   - Handles Track A (PyTorch) directly and proxies Tracks B/C/D to Triton
+   - Exposes port **4603** for ALL tracks
+   - Worker count: 2 (dev with PyTorch) or 64 (production) × 512 concurrent = up to **32,768 capacity**
+   - Handles Track A (PyTorch) directly and proxies Tracks B/C/D/E to Triton
    - Located in [src/main.py](src/main.py)
 
-### Four Performance Tracks
+3. **opensearch**: Vector database for Track E visual search
+   - OpenSearch 3.3.1 with k-NN plugin
+   - Exposes port **4607** (REST API)
+   - Security disabled for development
+
+### Five Performance Tracks
 
 | Track | Endpoint Pattern | Backend | Speedup | Description |
 |-------|-----------------|---------|---------|-------------|
@@ -33,17 +38,25 @@ The system uses Docker Compose to orchestrate services with a **unified API arch
 | **B** | `/predict/{model}` | Triton TRT | 2x | TensorRT + CPU NMS |
 | **C** | `/predict/{model}_end2end` | Triton TRT | 4x | TensorRT + GPU NMS |
 | **D** | `/predict/{model}_gpu_e2e_*` | Triton DALI | 10-15x | Full GPU pipeline |
+| **E** | `/track_e/*` | Triton + OpenSearch | N/A | Visual search with MobileCLIP |
 
 **Track D has 3 variants:**
 - `_gpu_e2e_streaming` - Low latency (video streaming)
 - `_gpu_e2e` - Balanced (general purpose)
 - `_gpu_e2e_batch` - Max throughput (batch processing)
 
+**Track E endpoints:**
+- `/track_e/ingest` - Ingest images with embeddings
+- `/track_e/search/image` - Image-to-image similarity search
+- `/track_e/search/text` - Text-to-image search
+- `/track_e/search/object` - Object-level search
+
 ### Model Communication Flow
 
 - **Track A**: FastAPI → PyTorch models (loaded at startup, shared instances)
 - **Tracks B/C/D**: FastAPI → Triton gRPC (port 8001) → GPU inference
-- External clients access ALL tracks via: `localhost:9600`
+- **Track E**: FastAPI → Triton gRPC → OpenSearch k-NN
+- External clients access ALL tracks via: `localhost:4603`
 
 ### Model Directory Structure
 
@@ -90,19 +103,20 @@ docker compose down
 
 ### Model Export
 
-Export YOLO models to all formats for the four tracks:
+Export YOLO models to all formats using Makefile commands:
 
 ```bash
-# Export all formats for small model
+# Export TRT + End2End for small model (recommended)
+make export-models
+
+# Or manually:
 docker compose exec yolo-api python /app/export/export_models.py \
     --models small \
-    --formats trt trt_end2end
-
-# Quick wrapper for small model only
-bash export/export_small_only.sh
+    --formats trt trt_end2end \
+    --normalize-boxes
 
 # Download PyTorch models for Track A
-bash export/download_pytorch_models.sh
+make download-pytorch
 ```
 
 This exports:
@@ -112,26 +126,39 @@ This exports:
 - **Track D**: Uses Track C + DALI preprocessing pipeline
 
 After export for Track D:
-1. Create DALI pipeline: `docker compose exec yolo-api python /app/dali/create_dali_letterbox_pipeline.py`
-2. Create ensembles: `docker compose exec yolo-api python /app/dali/create_ensembles.py --models small`
-3. Restart Triton: `docker compose restart triton-api`
+```bash
+make create-dali  # Creates DALI pipeline + ensembles and restarts Triton
+```
+
+For Track E (Visual Search):
+```bash
+make setup-track-e           # Complete Track E setup
+# Or step-by-step:
+make export-mobileclip       # Export MobileCLIP image/text encoders
+make create-dali-dual        # Create triple-branch DALI pipeline
+make restart-triton          # Load new models
+```
 
 ### Testing Inference
 
 Comprehensive test script for all tracks:
 
 ```bash
-# Test all 4 tracks with sample images
-bash tests/test_inference.sh
+# Test all 5 tracks with sample images
+make test-all-tracks
 
-# Test specific Track D variant
-bash tests/test_inference.sh /path/to/images small 10 batch
+# Or individual tracks:
+make test-track-a    # PyTorch
+make test-track-b    # TensorRT
+make test-track-c    # TensorRT + GPU NMS
+make test-track-d    # DALI + GPU pipeline
+make test-track-e    # Visual Search
 
-# Test single ONNX End2End model (local debugging)
-docker compose exec yolo-api python /app/tests/test_onnx_end2end.py
+# Compare detections across all tracks
+make compare-tracks
 
 # Verify end2end patch is applied
-docker compose exec yolo-api python /app/tests/test_end2end_patch.py
+make test-patch
 ```
 
 ### Benchmarking
@@ -161,7 +188,7 @@ Results are auto-saved to `benchmarks/results/` with timestamps.
 
 ## Important Implementation Details
 
-### API Endpoints (All on port 9600)
+### API Endpoints (All on port 4603)
 
 [src/main.py](src/main.py) provides:
 
@@ -176,21 +203,47 @@ Results are auto-saved to `benchmarks/results/` with timestamps.
 - `POST /predict/small_gpu_e2e`: Track D balanced
 - `POST /predict/small_gpu_e2e_batch`: Track D batch
 
+**Track E - Visual Search:**
+- `POST /track_e/detect`: YOLO detection only
+- `POST /track_e/predict`: Detection + global embedding
+- `POST /track_e/predict_full`: Detection + global + per-box embeddings
+- `POST /track_e/embed/image`: Image embedding only
+- `POST /track_e/embed/text`: Text embedding only
+- `POST /track_e/ingest`: Ingest image into OpenSearch index
+- `POST /track_e/search/image`: Image-to-image similarity search
+- `POST /track_e/search/text`: Text-to-image search
+- `POST /track_e/search/object`: Object-level search
+- `GET /track_e/index/stats`: Index statistics
+- `POST /track_e/index/create`: Create/recreate index
+- `DELETE /track_e/index`: Delete index
+
 Supported models: "small" (nano and medium in development)
 
-Response format:
+Response format (Tracks A-D):
 ```json
 {
   "detections": [
     {
       "x1": float, "y1": float, "x2": float, "y2": float,
       "confidence": float,
-      "class": int
+      "class_id": int
     }
   ],
-  "status": "success",
+  "image": {"width": int, "height": int},
+  "model": {"name": str, "backend": "pytorch|triton"},
   "track": "A|B|C|D",
-  "backend": "pytorch|triton"
+  "total_time_ms": float
+}
+```
+
+Response format (Track E search):
+```json
+{
+  "results": [
+    {"image_id": str, "score": float, "image_path": str}
+  ],
+  "total_results": int,
+  "search_time_ms": float
 }
 ```
 
@@ -211,10 +264,12 @@ All inference endpoints handle image preprocessing:
 
 ### Detection Output Format
 
-All inference methods return:
-- `x1, y1, x2, y2`: Bounding box coordinates in pixels (original image dimensions)
+All inference methods return normalized coordinates:
+- `x1, y1, x2, y2`: Bounding box coordinates normalized to [0, 1] range
 - `confidence`: Detection confidence score (0-1)
-- `class`: Integer class ID (0-79 for COCO dataset)
+- `class_id`: Integer class ID (0-79 for COCO dataset)
+
+To convert to pixel coordinates: `x1_px = x1 * image_width`, etc.
 
 Class names are stored in model metadata and can be retrieved from `models/{model_name}/labels.txt`.
 
@@ -233,9 +288,12 @@ Key Python packages in [requirements.txt](requirements.txt):
 - `tritonclient[all]`: Direct Triton gRPC/HTTP communication
 - `torch>=2.5.0`, `torchvision`: PyTorch backend for Track A
 - `tensorrt-cu12==10.13.3.9`: TensorRT Python API (MUST match Triton server version)
-- `nvidia-dali-cuda120`: GPU preprocessing for Track D
+- `nvidia-dali-cuda120`: GPU preprocessing for Tracks D and E
 - `opencv-python`, `pillow`: Image processing
 - `onnx>=1.12.0,<=1.19.1`, `onnxsim`, `onnxslim`: Model export and optimization
+- `opensearch-py>=2.3.0`: Async OpenSearch client for Track E vector search
+- `transformers>=4.30.0`: CLIP tokenizer for Track E text search
+- `timm`, `huggingface_hub`: Model loading for MobileCLIP export
 
 ## Attribution
 
@@ -257,21 +315,25 @@ See [ATTRIBUTION.md](ATTRIBUTION.md) for complete third-party code attribution, 
 ## Production Deployment
 
 When deploying to production:
-1. All endpoints available on single port (9600) - simplifies load balancing
+1. All endpoints available on single port (4603) - simplifies load balancing
 2. Choose track based on use case:
    - Track A: Development/debugging
    - Track B: Standard inference (2x faster)
    - Track C: High-performance inference (4x faster)
    - Track D: Maximum throughput (10-15x faster)
+   - Track E: Visual search (image/text-to-image similarity)
 3. Configure dynamic batching in model config.pbtxt based on workload
 4. Use monitoring stack (Prometheus + Grafana) to observe performance
 5. Scale horizontally: deploy multiple instances behind load balancer
+6. **Track E production**: Enable OpenSearch security, configure multi-node cluster
+7. **Workers**: Set `--workers=64` in docker-compose.yml for production throughput
 
 ## Monitoring
 
 The deployment includes a complete monitoring stack:
-- **Prometheus**: Scrapes Triton metrics every 5s (port 9090)
-- **Grafana**: Visualization dashboards (port 3000, admin/admin)
-- **Loki + Promtail**: Log aggregation and shipping
+- **Prometheus**: Scrapes Triton metrics every 5s (port 4604)
+- **Grafana**: Visualization dashboards (port 4605, admin/admin)
+- **Loki + Promtail**: Log aggregation and shipping (port 4606)
+- **OpenSearch Dashboards**: Vector search management (port 4608)
 
-View dashboards at http://localhost:3000 after starting services.
+View dashboards at http://localhost:4605 after starting services.

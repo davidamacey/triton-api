@@ -73,6 +73,10 @@ IMGS_TEST/
 # External repos cloned for reference (36MB - not needed in version control)
 reference_repos/
 
+# HuggingFace cache (tokenizers, models - downloaded at runtime)
+cache/huggingface/
+!cache/huggingface/.gitkeep
+
 # ============================================================================
 # Monitoring and Logs
 # ============================================================================

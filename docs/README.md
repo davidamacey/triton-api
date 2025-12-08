@@ -15,7 +15,7 @@ Welcome to the Triton YOLO Inference Server documentation.
 ## Documentation Structure
 
 ### Getting Started
-- **[MODEL_EXPORT_GUIDE.md](MODEL_EXPORT_GUIDE.md)** - Model building and export for all 4 tracks
+- **[MODEL_EXPORT_GUIDE.md](MODEL_EXPORT_GUIDE.md)** - Model building and export for all 5 tracks
 - **[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)** - Step-by-step deployment instructions
 - **[TESTING.md](TESTING.md)** - Testing strategy and validation procedures
 
@@ -33,17 +33,18 @@ Welcome to the Triton YOLO Inference Server documentation.
 - **[Tracks/BENCHMARKING_GUIDE.md](Tracks/BENCHMARKING_GUIDE.md)** - Comprehensive benchmarking methodology and results
 - **[Tracks/TRACK_D_COMPLETE.md](Tracks/TRACK_D_COMPLETE.md)** - Complete Track D guide (DALI + TRT + GPU NMS)
 
-### Future Development
-- **[future_work/TRACK_E_PROJECT_PLAN.md](future_work/TRACK_E_PROJECT_PLAN.md)** - Track E (Visual Search) project plan
-- **[future_work/TRACK_E_IMPLEMENTATION_PHASES.md](future_work/TRACK_E_IMPLEMENTATION_PHASES.md)** - Track E implementation phases
-- **[future_work/TRACK_E_FINAL_PHASES.md](future_work/TRACK_E_FINAL_PHASES.md)** - Track E production deployment phases
+### Track E Documentation
+- **[TRACK_E_GUIDE.md](TRACK_E_GUIDE.md)** - Track E (Visual Search) setup and usage guide
+- **[TRACK_E_IMPLEMENTATION_STATUS.md](TRACK_E_IMPLEMENTATION_STATUS.md)** - Track E implementation status
+- **[TRACK_E_SUMMARY.md](TRACK_E_SUMMARY.md)** - Track E architecture summary
+- **[TRACK_E_DEPLOYMENT_CHECKLIST.md](TRACK_E_DEPLOYMENT_CHECKLIST.md)** - Track E deployment checklist
 
 ### Implementation Notes
 - **[IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md)** - Design decisions and technical notes
 
 ---
 
-## Four Performance Tracks
+## Five Performance Tracks
 
 | Track | Technology | Speedup | Documentation |
 |-------|-----------|---------|---------------|
@@ -51,6 +52,7 @@ Welcome to the Triton YOLO Inference Server documentation.
 | **B** | TensorRT + CPU NMS | 2x | See [main README](../README.md) |
 | **C** | TensorRT + GPU NMS | 4x | See [Attribution/END2END_ANALYSIS.md](Attribution/END2END_ANALYSIS.md) |
 | **D** | DALI + TRT + GPU NMS | **10-15x** | See [Tracks/TRACK_D_COMPLETE.md](Tracks/TRACK_D_COMPLETE.md) |
+| **E** | MobileCLIP + OpenSearch | Visual Search | See [TRACK_E_GUIDE.md](TRACK_E_GUIDE.md) |
 
 ---
 
@@ -167,4 +169,4 @@ When adding new documentation:
 
 ---
 
-**Last Updated:** November 2025
+**Last Updated:** December 2025

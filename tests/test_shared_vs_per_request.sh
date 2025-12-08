@@ -108,15 +108,38 @@ echo ""
 echo ""
 
 # ============================================================================
-# 4. Comparison
+# 4. Test Track E Visual Search Endpoint
+# ============================================================================
+
+echo -e "${BLUE}4. Testing TRACK E (Visual Search) endpoint${NC}"
+echo -e "${YELLOW}Sending 10 concurrent requests to /track_e/detect...${NC}"
+
+TRACK_E_START=$(date +%s%N)
+
+for i in {1..10}; do
+    curl -s -X POST "http://localhost:9600/track_e/detect" \
+        -F "image=@${TEST_IMAGE}" > /dev/null &
+done
+wait
+
+TRACK_E_END=$(date +%s%N)
+TRACK_E_TIME=$(( ($TRACK_E_END - $TRACK_E_START) / 1000000 ))
+
+echo -e "${GREEN}✓ Track E mode: ${TRACK_E_TIME}ms for 10 requests${NC}"
+echo ""
+echo ""
+
+# ============================================================================
+# 5. Comparison
 # ============================================================================
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}Results Summary${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
-echo -e "Shared Client Mode:     ${SHARED_TIME}ms"
-echo -e "Per-Request Client Mode: ${PER_REQ_TIME}ms"
+echo -e "Shared Client Mode (Track C):      ${SHARED_TIME}ms"
+echo -e "Per-Request Client Mode (Track C): ${PER_REQ_TIME}ms"
+echo -e "Track E Visual Search:             ${TRACK_E_TIME}ms"
 echo ""
 
 if [ $SHARED_TIME -lt $PER_REQ_TIME ]; then
@@ -131,7 +154,7 @@ fi
 echo ""
 
 # ============================================================================
-# 5. Recommendations
+# 6. Recommendations
 # ============================================================================
 
 echo -e "${BLUE}========================================${NC}"

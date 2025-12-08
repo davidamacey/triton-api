@@ -4,13 +4,15 @@ PyTorch-specific utilities for YOLO inference.
 Thread-safe wrappers, model loading, and lifecycle management for PyTorch models.
 """
 
+import logging
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Dict, List
-from ultralytics import YOLO
-from ultralytics.utils import ThreadingLocked
+
 import numpy as np
 import torch
-import logging
+from ultralytics import YOLO
+from ultralytics.utils import ThreadingLocked
+
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Solution: Use @ThreadingLocked() decorator from ultralytics
 # https://docs.ultralytics.com/guides/yolo-thread-safe-inference/
 # ============================================================================
+
 
 @ThreadingLocked()
 def thread_safe_predict(model: YOLO, img: np.ndarray):
@@ -52,7 +55,7 @@ def thread_safe_predict(model: YOLO, img: np.ndarray):
         Detection results from YOLO model
 
     Example:
-        >>> model = YOLO("/app/pytorch_models/yolo11n.pt")
+        >>> model = YOLO('/app/pytorch_models/yolo11n.pt')
         >>> results = thread_safe_predict(model, img)
     """
     # Use FP16 if GPU available (to match TensorRT models)
@@ -61,7 +64,7 @@ def thread_safe_predict(model: YOLO, img: np.ndarray):
 
 
 @ThreadingLocked()
-def thread_safe_predict_batch(model: YOLO, images: List[np.ndarray]):
+def thread_safe_predict_batch(model: YOLO, images: list[np.ndarray]):
     """
     Thread-safe batch inference for PyTorch models.
 
@@ -75,7 +78,7 @@ def thread_safe_predict_batch(model: YOLO, images: List[np.ndarray]):
         Batch detection results from YOLO model
 
     Example:
-        >>> model = YOLO("/app/pytorch_models/yolo11n.pt")
+        >>> model = YOLO('/app/pytorch_models/yolo11n.pt')
         >>> results = thread_safe_predict_batch(model, [img1, img2, img3])
     """
     # Use FP16 if GPU available (to match TensorRT models)
@@ -87,11 +90,10 @@ def thread_safe_predict_batch(model: YOLO, images: List[np.ndarray]):
 # Model Loading and Lifecycle Management
 # ============================================================================
 
+
 def load_pytorch_models(
-    model_paths: Dict[str, str],
-    device: str = 'cuda',
-    warmup: bool = True
-) -> Dict[str, YOLO]:
+    model_paths: dict[str, str], device: str = 'cuda', warmup: bool = True
+) -> dict[str, YOLO]:
     """
     Load multiple YOLO PyTorch models with GPU placement and warmup.
 
@@ -118,19 +120,21 @@ def load_pytorch_models(
         Exception: If model loading fails (logged but not raised)
 
     Example:
-        >>> models = load_pytorch_models({
-        ...     "nano": "/app/pytorch_models/yolo11n.pt",
-        ...     "small": "/app/pytorch_models/yolo11s.pt"
-        ... })
+        >>> models = load_pytorch_models(
+        ...     {
+        ...         'nano': '/app/pytorch_models/yolo11n.pt',
+        ...         'small': '/app/pytorch_models/yolo11s.pt',
+        ...     }
+        ... )
         >>> # models["nano"] is ready for inference
     """
     loaded_models = {}
 
-    logger.info(f"Loading {len(model_paths)} YOLO models...")
+    logger.info(f'Loading {len(model_paths)} YOLO models...')
 
     for model_name, model_path in model_paths.items():
         try:
-            logger.info(f"\n  → Loading {model_name} ({model_path})...")
+            logger.info(f'\n  → Loading {model_name} ({model_path})...')
 
             # Load model from .pt file
             model = YOLO(model_path)
@@ -138,26 +142,26 @@ def load_pytorch_models(
             # Move to GPU if available
             if device == 'cuda' and torch.cuda.is_available():
                 model.to(device)
-                logger.info(f"    Moved to GPU: {torch.cuda.get_device_name(0)}")
+                logger.info(f'    Moved to GPU: {torch.cuda.get_device_name(0)}')
 
             # Warmup inference (initialize CUDA kernels)
             if warmup:
-                logger.info(f"    Warming up {model_name}...")
+                logger.info(f'    Warming up {model_name}...')
                 dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
                 _ = model(dummy_img, verbose=False)
 
             loaded_models[model_name] = model
-            logger.info(f"    ✓ {model_name} ready")
+            logger.info(f'    ✓ {model_name} ready')
 
         except Exception as e:
-            logger.error(f"    ✗ Failed to load {model_name}: {e}")
+            logger.error(f'    ✗ Failed to load {model_name}: {e}')
 
     # Summary
     if loaded_models:
-        logger.info(f"\n✓ Successfully loaded {len(loaded_models)}/{len(model_paths)} models")
-        logger.info(f"  Available: {list(loaded_models.keys())}")
+        logger.info(f'\n✓ Successfully loaded {len(loaded_models)}/{len(model_paths)} models')
+        logger.info(f'  Available: {list(loaded_models.keys())}')
     else:
-        logger.error("✗ No models loaded successfully!")
+        logger.error('✗ No models loaded successfully!')
 
     return loaded_models
 
@@ -169,12 +173,12 @@ def log_gpu_info():
     Useful for debugging and verifying GPU availability.
     """
     if torch.cuda.is_available():
-        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f'GPU: {torch.cuda.get_device_name(0)}')
         gpu_props = torch.cuda.get_device_properties(0)
-        logger.info(f"GPU Memory: {gpu_props.total_memory / 1e9:.2f} GB")
-        logger.info(f"Compute Capability: {gpu_props.major}.{gpu_props.minor}")
+        logger.info(f'GPU Memory: {gpu_props.total_memory / 1e9:.2f} GB')
+        logger.info(f'Compute Capability: {gpu_props.major}.{gpu_props.minor}')
     else:
-        logger.warning("GPU not available - using CPU")
+        logger.warning('GPU not available - using CPU')
 
 
 def log_gpu_memory():
@@ -184,12 +188,12 @@ def log_gpu_memory():
     Useful for monitoring memory consumption after loading models.
     """
     if torch.cuda.is_available():
-        logger.info("GPU Memory Usage:")
-        logger.info(f"  Allocated: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
-        logger.info(f"  Reserved:  {torch.cuda.memory_reserved(0) / 1e9:.2f} GB")
+        logger.info('GPU Memory Usage:')
+        logger.info(f'  Allocated: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB')
+        logger.info(f'  Reserved:  {torch.cuda.memory_reserved(0) / 1e9:.2f} GB')
 
 
-def cleanup_pytorch_models(model_instances: Dict[str, YOLO]):
+def cleanup_pytorch_models(model_instances: dict[str, YOLO]):
     """
     Clean up PyTorch models and free GPU memory.
 
@@ -209,7 +213,7 @@ def cleanup_pytorch_models(model_instances: Dict[str, YOLO]):
         return
 
     if torch.cuda.is_available():
-        logger.info("Clearing GPU memory...")
+        logger.info('Clearing GPU memory...')
 
         # Delete all model instances
         for model_name in list(model_instances.keys()):
@@ -218,18 +222,16 @@ def cleanup_pytorch_models(model_instances: Dict[str, YOLO]):
         # Clear CUDA cache
         torch.cuda.empty_cache()
 
-        logger.info("✓ GPU memory cleared")
+        logger.info('✓ GPU memory cleared')
 
     # Clear dictionary
     model_instances.clear()
-    logger.info("✓ Model cleanup complete")
+    logger.info('✓ Model cleanup complete')
 
 
 @asynccontextmanager
 async def pytorch_lifespan(
-    app,
-    model_paths: Dict[str, str],
-    model_storage: Dict[str, YOLO]
+    _app, model_paths: dict[str, str], model_storage: dict[str, YOLO]
 ) -> AsyncGenerator[None, None]:
     """
     FastAPI lifespan context manager for PyTorch models.
@@ -256,7 +258,7 @@ async def pytorch_lifespan(
         None (application runs between startup and shutdown)
 
     Example:
-        >>> MODEL_PATHS = {"nano": "/app/pytorch_models/yolo11n.pt"}
+        >>> MODEL_PATHS = {'nano': '/app/pytorch_models/yolo11n.pt'}
         >>> MODEL_INSTANCES = {}
         >>>
         >>> @asynccontextmanager
@@ -269,13 +271,13 @@ async def pytorch_lifespan(
     # ========================================================================
     # Startup
     # ========================================================================
-    logger.info("=" * 60)
-    logger.info("Starting PyTorch YOLO API")
-    logger.info("=" * 60)
+    logger.info('=' * 60)
+    logger.info('Starting PyTorch YOLO API')
+    logger.info('=' * 60)
 
     # GPU info
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    logger.info(f"Device: {device}")
+    logger.info(f'Device: {device}')
     log_gpu_info()
 
     # Load models
@@ -287,12 +289,12 @@ async def pytorch_lifespan(
 
     # Memory stats
     if device == 'cuda':
-        logger.info("")
+        logger.info('')
         log_gpu_memory()
 
-    logger.info("=" * 60)
-    logger.info("Service ready for inference requests")
-    logger.info("=" * 60 + "\n")
+    logger.info('=' * 60)
+    logger.info('Service ready for inference requests')
+    logger.info('=' * 60 + '\n')
 
     # ========================================================================
     # Application runs here
@@ -302,59 +304,63 @@ async def pytorch_lifespan(
     # ========================================================================
     # Shutdown
     # ========================================================================
-    logger.info("\n" + "=" * 60)
-    logger.info("Shutting down PyTorch YOLO API")
-    logger.info("=" * 60)
+    logger.info('\n' + '=' * 60)
+    logger.info('Shutting down PyTorch YOLO API')
+    logger.info('=' * 60)
 
     cleanup_pytorch_models(model_storage)
 
-    logger.info("=" * 60)
-    logger.info("Shutdown complete")
-    logger.info("=" * 60 + "\n")
+    logger.info('=' * 60)
+    logger.info('Shutdown complete')
+    logger.info('=' * 60 + '\n')
 
 
 # ============================================================================
 # Detection Formatting Utilities
 # ============================================================================
 
-def format_detections(results) -> List[Dict]:
+
+def format_detections(results) -> list[dict]:
     """
-    Extract and format detections from YOLO results.
+    Extract and format detections from YOLO results with NORMALIZED coordinates.
 
-    Converts YOLO's internal format to standard API response format.
-
-    **Input format** (YOLO results):
-    - results[0].boxes.xyxy: Bounding boxes [N, 4] (x1, y1, x2, y2)
-    - results[0].boxes.conf: Confidence scores [N]
-    - results[0].boxes.cls: Class IDs [N]
+    Uses Ultralytics' built-in `boxes.xyxyn` property which returns coordinates
+    normalized to [0, 1] range relative to original image dimensions.
 
     **Output format** (API response):
-    - List of dicts with x1, y1, x2, y2, confidence, class
+    - List of dicts with x1, y1, x2, y2 in NORMALIZED [0,1] coordinates
+    - confidence, class fields
+
+    **Why normalized coordinates:**
+    - Industry standard for object detection
+    - Database-friendly (works with any image resolution)
+    - Consistent with TensorRT End2End models (EfficientNMS normalize_boxes=True)
+    - Easy to convert back: x_pixel = x_norm * width
 
     Args:
         results: YOLO detection results
 
     Returns:
-        List of detection dictionaries
+        List of detection dictionaries with normalized coordinates
 
     Example:
-        >>> results = model(img)
+        >>> results = model(img)  # 1920x1080 image
         >>> detections = format_detections(results)
-        >>> # [{"x1": 10.5, "y1": 20.3, ..., "confidence": 0.95, "class": 0}]
+        >>> # [{"x1": 0.052, "y1": 0.185, ..., "confidence": 0.95, "class": 0}]
     """
-    boxes = results[0].boxes.xyxy.cpu().numpy()
+    # Use Ultralytics built-in xyxyn for normalized [0,1] coordinates
+    boxes = results[0].boxes.xyxyn.cpu().numpy()
     scores = results[0].boxes.conf.cpu().numpy()
     classes = results[0].boxes.cls.cpu().numpy()
 
-    formatted = []
-    for box, score, cls in zip(boxes, scores, classes):
-        formatted.append({
+    return [
+        {
             'x1': float(box[0]),
             'y1': float(box[1]),
             'x2': float(box[2]),
             'y2': float(box[3]),
             'confidence': float(score),
-            'class': int(cls)
-        })
-
-    return formatted
+            'class': int(cls),
+        }
+        for box, score, cls in zip(boxes, scores, classes, strict=False)
+    ]

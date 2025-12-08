@@ -74,11 +74,11 @@ model.export(format="onnx_trt", ...)
 
 ### Export Script Example
 
-See `scripts/export_end2end.py` for complete export script.
+See `export/export_models.py` for complete export script.
 
 ```bash
 # Export all YOLOv11 models with end2end NMS
-docker compose exec yolo-api python scripts/export_end2end.py
+docker compose exec yolo-api python /app/export/export_models.py --formats trt_end2end
 ```
 
 ## Output Format
@@ -120,12 +120,12 @@ print("✅ NMS plugin successfully embedded!")
 
 After export, deploy to Triton with `platform: "onnxruntime_onnx"` or convert to TensorRT engine.
 
-Example config: `models/yolov11_nano_end2end/config.pbtxt`
+Example config: `models/yolov11_small_trt_end2end/config.pbtxt`
 
 ```protobuf
-name: "yolov11_nano_end2end"
-platform: "onnxruntime_onnx"
-max_batch_size: 128
+name: "yolov11_small_trt_end2end"
+platform: "tensorrt_plan"
+max_batch_size: 64
 
 input [
   { name: "images", data_type: TYPE_FP32, dims: [3, 640, 640] }
@@ -133,23 +133,19 @@ input [
 
 output [
   { name: "num_dets", data_type: TYPE_INT32, dims: [1] },
-  { name: "det_boxes", data_type: TYPE_FP32, dims: [100, 4] },
-  { name: "det_scores", data_type: TYPE_FP32, dims: [100] },
-  { name: "det_classes", data_type: TYPE_INT32, dims: [100] }
+  { name: "det_boxes", data_type: TYPE_FP32, dims: [300, 4] },
+  { name: "det_scores", data_type: TYPE_FP32, dims: [300] },
+  { name: "det_classes", data_type: TYPE_INT32, dims: [300] }
 ]
 
 dynamic_batching {
-  preferred_batch_size: [8, 16, 32, 64, 128]
+  preferred_batch_size: [8, 16, 32, 64]
+  max_queue_delay_microseconds: 5000
 }
 
-optimization {
-  execution_accelerators {
-    gpu_execution_accelerator {
-      name: "tensorrt"
-      parameters { key: "precision_mode", value: "FP16" }
-    }
-  }
-}
+instance_group [
+  { count: 2, kind: KIND_GPU }
+]
 ```
 
 ## Supported Models

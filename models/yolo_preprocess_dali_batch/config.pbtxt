@@ -39,15 +39,10 @@ output [
 
 # NVIDIA Best Practice: Use count=1 to avoid unnaturally increased memory consumption
 # See: https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/dali_backend/
-# DUAL-GPU CONFIGURATION: 12 total instances across both A6000 GPUs
+# TRACK D: Runs on container GPU 1 (host GPU 2) for benchmark isolation from Track E (GPU 0)
 instance_group [
   {
-    count: 6         # GPU 0: 6 instances (~28GB, 20GB headroom for MobileCLIP)
-    kind: KIND_GPU
-    gpus: [ 0 ]
-  },
-  {
-    count: 6         # GPU 1 (host GPU 2): 6 instances (~28GB, 20GB headroom for future models)
+    count: 8
     kind: KIND_GPU
     gpus: [ 1 ]
   }
@@ -59,6 +54,14 @@ dynamic_batching {
   preferred_batch_size: [ 16, 32, 64 ]
   max_queue_delay_microseconds: 200000  # 200ms - optimized for large (20MP) image batching
   preserve_ordering: false
+
+  # Queue policy to prevent server deadlock under high load
+  default_queue_policy {
+    timeout_action: REJECT
+    default_timeout_microseconds: 10000000  # 10 seconds - handles 20MP image P99 latency
+    allow_timeout_override: false
+    max_queue_size: 256  # Reject excess requests gracefully (HTTP 503)
+  }
 }
 
 parameters: {

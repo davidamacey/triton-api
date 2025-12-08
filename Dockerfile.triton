@@ -1,0 +1,18 @@
+# Custom Triton Server with PyTorch for Python Backend
+# Required for box_embedding_extractor (ROI align + per-box embeddings)
+#
+# Based on: nvcr.io/nvidia/tritonserver:25.10-py3
+# Adds: PyTorch + TorchVision for Python backend models
+
+FROM nvcr.io/nvidia/tritonserver:25.10-py3
+
+# Install PyTorch and TorchVision (CUDA 12.x compatible)
+# Using pip for faster install than conda
+RUN pip install --no-cache-dir \
+    torch==2.5.1 \
+    torchvision==0.20.1 \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# Verify installation
+RUN python3 -c "import torch; print(f'PyTorch {torch.__version__} installed, CUDA: {torch.cuda.is_available()}')"
+RUN python3 -c "import torchvision; print(f'TorchVision {torchvision.__version__} installed')"

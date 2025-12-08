@@ -1,0 +1,126 @@
+# Track E (Simple): YOLO + MobileCLIP Ensemble (FAST)
+#
+# Fast GPU pipeline for detection + global image embedding:
+# 1. DALI: Decode + dual preprocessing (YOLO 640×640, CLIP 256×256) - FIXED SIZE ONLY
+# 2. YOLO: Object detection with GPU NMS (parallel with step 3)
+# 3. MobileCLIP: Global image embedding (parallel with step 2)
+#
+# This ensemble uses yolo_clip_preprocess_dali (no original_images) for speed.
+# For per-box embeddings, use yolo_mobileclip_ensemble instead.
+#
+# Input: Raw JPEG bytes + affine matrix
+# Outputs: Detections + global image embedding (512-dim)
+
+name: "yolo_clip_ensemble"
+platform: "ensemble"
+max_batch_size: 64
+
+input [
+  {
+    name: "encoded_images"
+    data_type: TYPE_UINT8
+    dims: [ -1 ]
+  },
+  {
+    name: "affine_matrices"
+    data_type: TYPE_FP32
+    dims: [ 2, 3 ]
+  }
+]
+
+output [
+  # YOLO detections
+  {
+    name: "num_dets"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "det_boxes"
+    data_type: TYPE_FP32
+    dims: [ 300, 4 ]
+  },
+  {
+    name: "det_scores"
+    data_type: TYPE_FP32
+    dims: [ 300 ]
+  },
+  {
+    name: "det_classes"
+    data_type: TYPE_INT32
+    dims: [ 300 ]
+  },
+  # MobileCLIP global embedding (512-dim for MobileCLIP2-S2)
+  {
+    name: "global_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 512 ]
+  }
+]
+
+ensemble_scheduling {
+  step [
+    # Step 1: Fast DALI preprocessing (YOLO + CLIP only, NO original_images)
+    # Fixed-size outputs = fast memory allocation
+    {
+      model_name: "yolo_clip_preprocess_dali"
+      model_version: -1
+      input_map {
+        key: "encoded_images"
+        value: "encoded_images"
+      }
+      input_map {
+        key: "affine_matrices"
+        value: "affine_matrices"
+      }
+      output_map {
+        key: "yolo_images"
+        value: "_yolo_images"
+      }
+      output_map {
+        key: "clip_images"
+        value: "_clip_images"
+      }
+    },
+
+    # Step 2: YOLO detection (runs in parallel with Step 3)
+    {
+      model_name: "yolov11_small_trt_end2end"
+      model_version: -1
+      input_map {
+        key: "images"
+        value: "_yolo_images"
+      }
+      output_map {
+        key: "num_dets"
+        value: "num_dets"
+      }
+      output_map {
+        key: "det_boxes"
+        value: "det_boxes"
+      }
+      output_map {
+        key: "det_scores"
+        value: "det_scores"
+      }
+      output_map {
+        key: "det_classes"
+        value: "det_classes"
+      }
+    },
+
+    # Step 3: Global image embedding (runs in parallel with Step 2)
+    {
+      model_name: "mobileclip2_s2_image_encoder"
+      model_version: -1
+      input_map {
+        key: "images"
+        value: "_clip_images"
+      }
+      output_map {
+        key: "image_embeddings"
+        value: "global_embeddings"
+      }
+    }
+  ]
+}

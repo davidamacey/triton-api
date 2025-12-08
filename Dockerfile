@@ -6,8 +6,13 @@
 #   - Track B: TensorRT + CPU NMS (via Triton gRPC)
 #   - Track C: TensorRT + GPU NMS (via Triton gRPC)
 #   - Track D: DALI + TensorRT (via Triton gRPC ensembles)
+#   - Track E: MobileCLIP Visual Search (via Triton + OpenSearch)
 #
-# All tracks are accessible on port 9600 via FastAPI
+# All tracks are accessible on port 8000 via FastAPI
+#
+# VOLUME MOUNTS REQUIRED:
+#   - ./pytorch_models:/app/pytorch_models  (MobileCLIP checkpoints)
+#   - ./reference_repos:/app/reference_repos  (ml-mobileclip, open_clip repos)
 # =============================================================================
 
 FROM python:3.12-slim-trixie
@@ -24,8 +29,9 @@ WORKDIR /app
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install system dependencies and build Python packages
-# Build dependencies (gcc, g++) are removed after pip install to keep image small
+# =============================================================================
+# Stage 1: Install system dependencies and Python packages
+# =============================================================================
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # Runtime dependencies
     libgl1 \
@@ -33,6 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     curl \
     jq \
+    git \
     # Build dependencies (temporary, for compiling C extensions)
     gcc \
     g++ \
@@ -48,40 +55,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Copy the application code
+# =============================================================================
+# Stage 2: Copy application code
+# =============================================================================
 COPY src/ ./src/
-
-# Copy scripts for management
 COPY scripts/ ./scripts/
 
 # Create non-root user for security best practices
+# Note: reference_repos and pytorch_models are mounted from host
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app && \
-    chmod +x /app/scripts/*.sh
+    chmod +x /app/scripts/*.sh 2>/dev/null || true && \
+    chmod +x /app/scripts/**/*.sh 2>/dev/null || true
 
 USER appuser
 
 # =============================================================================
 # Default Configuration
 # =============================================================================
-# The CMD is overridden in docker-compose.yml for each service
-# Default: All tracks enabled (useful for development/testing)
-# =============================================================================
-
 ENV SERVICE_MODE=all \
-    SERVICE_PORT=9600
+    SERVICE_PORT=8000
 
 EXPOSE ${SERVICE_PORT}
 
-# Health check (port will be overridden by docker-compose)
+# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import requests, os; requests.get(f'http://localhost:{os.getenv(\"SERVICE_PORT\", \"9600\")}/health', timeout=5).raise_for_status()" || exit 1
+    CMD python -c "import requests, os; requests.get(f'http://localhost:{os.getenv(\"SERVICE_PORT\", \"8000\")}/health', timeout=5).raise_for_status()" || exit 1
 
 # Default CMD - runs unified service with all tracks
-# Override this in docker-compose.yml for specific configurations
 CMD ["uvicorn", "src.main:app", \
      "--host", "0.0.0.0", \
-     "--port", "9600", \
+     "--port", "8000", \
      "--workers", "1", \
      "--loop", "uvloop", \
      "--http", "httptools", \
