@@ -98,10 +98,9 @@ services:
       # ===================================================================
       # Worker Configuration (Performance Tuning)
       # Production: 64 workers for dual-GPU throughput
-      # Testing with PyTorch (ENABLE_PYTORCH=true): Use 2 workers to avoid
-      # loading 64 copies of the model (~1-3GB wasted GPU memory)
+      # Benchmark: 4 workers to match TRT instance count for fair comparison
       # ===================================================================
-      - --workers=2  # Reduced for PyTorch comparison testing (was 64)
+      - --workers=4  # Match TRT instance count (4) for fair benchmark comparison
       - --limit-max-requests=10000       # Recycle workers every 10k requests (prevents memory leaks)
       # ===================================================================
       # Event Loop & HTTP Protocol (Already Optimized)

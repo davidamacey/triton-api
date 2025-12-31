@@ -1,0 +1,76 @@
+# ============================================================================
+# BENCHMARK CONFIGURATION - EQUALIZED INSTANCES
+# ============================================================================
+# Model: mobileclip2_s2_image_encoder
+# Backend: tensorrt
+# Instance count: 4 (standardized for fair comparison)
+# GPU: 0 (isolated benchmark mode)
+# ============================================================================
+#
+# Standard instance counts:
+#   - DALI preprocessing: 6 (I/O-bound, feeds GPU)
+#   - TRT inference: 4 (compute-bound)
+#   - Python backend: 4
+#
+# This config is used by isolated_benchmark.sh for fair testing.
+# Production configs remain in models/mobileclip2_s2_image_encoder/config.pbtxt
+# ============================================================================
+
+# MobileCLIP2-S2 Image Encoder - TensorRT
+# Converts preprocessed images to 512-dim L2-normalized embeddings
+#
+# Input: [B, 3, 256, 256] FP32, normalized [0, 1]
+# Output: [B, 512] FP32, L2-normalized
+
+name: "mobileclip2_s2_image_encoder"
+platform: "tensorrt_plan"
+max_batch_size: 64
+
+input [
+  {
+    name: "images"
+    data_type: TYPE_FP32
+    dims: [ 3, 256, 256 ]
+  }
+]
+
+output [
+  {
+    name: "image_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 512 ]
+  }
+]
+
+# Dynamic batching for maximum throughput
+dynamic_batching {
+  preferred_batch_size: [ 8, 16, 32, 64 ]
+  max_queue_delay_microseconds: 50000  # 50ms - match Track D batch settings
+  preserve_ordering: false
+
+  # Queue policy to prevent server deadlock under high load
+  default_queue_policy {
+    timeout_action: REJECT
+    default_timeout_microseconds: 10000000  # 10 seconds - handles Track E embedding pipeline
+    allow_timeout_override: false
+    max_queue_size: 256  # Reject excess requests gracefully (HTTP 503)
+  }
+}
+
+# Multiple instances for parallel processing
+instance_group [
+  {
+    count: 4
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+# TensorRT optimization
+# NOTE: CUDA graphs disabled to avoid stream conflicts with other models
+optimization {
+  cuda {
+    graphs: false
+    busy_wait_events: true
+  }
+}

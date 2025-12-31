@@ -998,17 +998,17 @@ func checkAvailability(tracks []Track, quiet bool) []Track {
 	return available
 }
 
-func getBaseURL(url string) string {
-	for i := len(url) - 1; i >= 0; i-- {
-		if url[i] == '/' {
-			for j := i - 1; j >= 0; j-- {
-				if url[j] == '/' {
-					return url[:j]
-				}
-			}
+func getBaseURL(urlStr string) string {
+	// Extract scheme://host:port from URL
+	// Example: http://localhost:4603/pytorch/predict/small -> http://localhost:4603
+	if idx := strings.Index(urlStr, "://"); idx != -1 {
+		// Find the first slash after scheme://
+		rest := urlStr[idx+3:]
+		if slashIdx := strings.Index(rest, "/"); slashIdx != -1 {
+			return urlStr[:idx+3+slashIdx]
 		}
 	}
-	return url
+	return urlStr
 }
 
 func createHTTPClient(maxConns int) *http.Client {

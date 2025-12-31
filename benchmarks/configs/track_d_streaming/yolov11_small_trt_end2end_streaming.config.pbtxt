@@ -1,0 +1,99 @@
+# ============================================================================
+# BENCHMARK CONFIGURATION - EQUALIZED INSTANCES
+# ============================================================================
+# Model: yolov11_small_trt_end2end_streaming
+# Backend: tensorrt
+# Instance count: 4 (standardized for fair comparison)
+# GPU: 0 (isolated benchmark mode)
+# ============================================================================
+#
+# Standard instance counts:
+#   - DALI preprocessing: 6 (I/O-bound, feeds GPU)
+#   - TRT inference: 4 (compute-bound)
+#   - Python backend: 4
+#
+# This config is used by isolated_benchmark.sh for fair testing.
+# Production configs remain in models/yolov11_small_trt_end2end_streaming/config.pbtxt
+# ============================================================================
+
+# YOLO11 Small - TensorRT Engine with Compiled NMS
+# =================================================
+# This model has NMS compiled directly into the TensorRT engine.
+# No CPU post-processing needed - outputs final detections directly.
+#
+# Built from: yolov11_small_end2end ONNX (with TRT::EfficientNMS_TRT operators)
+# Performance: 3-5x faster than standard TRT + CPU NMS
+
+name: "yolov11_small_trt_end2end_streaming"
+platform: "tensorrt_plan"
+max_batch_size: 64  # Must match TensorRT plan file capability
+
+input [
+  {
+    name: "images"
+    data_type: TYPE_FP32
+    dims: [ 3, 640, 640 ]
+  }
+]
+
+# End2End outputs - NMS already applied!
+output [
+  {
+    name: "num_dets"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "det_boxes"
+    data_type: TYPE_FP32
+    dims: [ 100, 4 ]  # Max 100 detections (model.plan not yet re-exported)
+  },
+  {
+    name: "det_scores"
+    data_type: TYPE_FP32
+    dims: [ 100 ]
+  },
+  {
+    name: "det_classes"
+    data_type: TYPE_INT32
+    dims: [ 100 ]
+  }
+]
+
+# TRACK D: Runs on container GPU 1 (host GPU 2) for benchmark isolation from Track E (GPU 0)
+instance_group [
+  {
+    count: 4
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 2, 4, 8 ]
+  max_queue_delay_microseconds: 1000  # 1ms - ultra-low latency for streaming
+  preserve_ordering: true  # Maintain frame order for video
+
+  default_queue_policy {
+    timeout_action: REJECT
+    default_timeout_microseconds: 10000000  # 10 seconds - handles 20MP image P99 latency
+    allow_timeout_override: false
+    max_queue_size: 128
+  }
+}
+
+# Warmup with representative batch sizes (focuses on small batches for streaming)
+model_warmup [
+  { name: "warmup_1", batch_size: 1, count: 3,
+    inputs { key: "images" value { data_type: TYPE_FP32, dims: [3,640,640], random_data: true }}},
+  { name: "warmup_2", batch_size: 2, count: 3,
+    inputs { key: "images" value { data_type: TYPE_FP32, dims: [3,640,640], random_data: true }}},
+  { name: "warmup_4", batch_size: 4, count: 3,
+    inputs { key: "images" value { data_type: TYPE_FP32, dims: [3,640,640], random_data: true }}},
+  { name: "warmup_8", batch_size: 8, count: 3,
+    inputs { key: "images" value { data_type: TYPE_FP32, dims: [3,640,640], random_data: true }}},
+  { name: "warmup_32", batch_size: 32, count: 1,
+    inputs { key: "images" value { data_type: TYPE_FP32, dims: [3,640,640], random_data: true }}},
+  { name: "warmup_64", batch_size: 64, count: 1,
+    inputs { key: "images" value { data_type: TYPE_FP32, dims: [3,640,640], random_data: true }}}
+]

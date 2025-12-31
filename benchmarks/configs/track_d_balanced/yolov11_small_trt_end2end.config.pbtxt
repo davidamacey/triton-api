@@ -1,0 +1,65 @@
+# ============================================================================
+# BENCHMARK CONFIGURATION - EQUALIZED INSTANCES
+# ============================================================================
+# Model: yolov11_small_trt_end2end
+# Backend: tensorrt
+# Instance count: 4 (standardized for fair comparison)
+# GPU: 0 (isolated benchmark mode)
+# ============================================================================
+#
+# Standard instance counts:
+#   - DALI preprocessing: 6 (I/O-bound, feeds GPU)
+#   - TRT inference: 4 (compute-bound)
+#   - Python backend: 4
+#
+# This config is used by isolated_benchmark.sh for fair testing.
+# Production configs remain in models/yolov11_small_trt_end2end/config.pbtxt
+# ============================================================================
+
+name: "yolov11_small_trt_end2end"
+platform: "tensorrt_plan"
+max_batch_size: 64
+
+input [
+  {
+    name: "images"
+    data_type: TYPE_FP32
+    dims: [ 3, 640, 640 ]
+  }
+]
+
+output [
+  {
+    name: "num_dets"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "det_boxes"
+    data_type: TYPE_FP32
+    dims: [ 300, 4 ]
+  },
+  {
+    name: "det_scores"
+    data_type: TYPE_FP32
+    dims: [ 300 ]
+  },
+  {
+    name: "det_classes"
+    data_type: TYPE_INT32
+    dims: [ 300 ]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 8, 16, 32, 64 ]
+  max_queue_delay_microseconds: 5000
+}
+
+instance_group [
+  {
+    count: 4
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]

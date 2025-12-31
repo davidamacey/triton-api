@@ -1,0 +1,91 @@
+# ============================================================================
+# BENCHMARK CONFIGURATION - EQUALIZED INSTANCES
+# ============================================================================
+# Model: yolo_preprocess_dali_streaming
+# Backend: dali
+# Instance count: 6 (standardized for fair comparison)
+# GPU: 0 (isolated benchmark mode)
+# ============================================================================
+#
+# Standard instance counts:
+#   - DALI preprocessing: 6 (I/O-bound, feeds GPU)
+#   - TRT inference: 4 (compute-bound)
+#   - Python backend: 4
+#
+# This config is used by isolated_benchmark.sh for fair testing.
+# Production configs remain in models/yolo_preprocess_dali_streaming/config.pbtxt
+# ============================================================================
+
+# YOLO Preprocessing - DALI Backend (STREAMING VARIANT)
+# GPU-accelerated preprocessing pipeline for YOLO11
+# Pipeline: nvJPEG decode → Warp Affine (letterbox) → Normalize → CHW transpose
+#
+# Optimized for: Real-time video streaming (low latency)
+# - Max batch: 8 (smaller batches for lower latency)
+# - Batching delay: 1ms (ultra-low latency)
+#
+# Uses fn.warp_affine for exact Ultralytics LetterBox compatibility:
+# - Scale + translate + pad in single GPU operation
+# - Centered padding with gray (114, 114, 114)
+# - Requires affine transformation matrix per image
+#
+# NVIDIA Best Practices:
+# - device="mixed" for image decoder (uses nvJPEG GPU acceleration)
+# - instance count=1 (NVIDIA warning: count>1 causes unnaturally high memory usage)
+# - hw_decoder_load=0.65 (optimal for Ampere+ hardware decoder offload)
+
+name: "yolo_preprocess_dali_streaming"
+backend: "dali"
+max_batch_size: 8
+
+input [
+  {
+    name: "encoded_images"
+    data_type: TYPE_UINT8
+    dims: [ -1 ]  # Variable-length JPEG bytes
+  },
+  {
+    name: "affine_matrices"
+    data_type: TYPE_FP32
+    dims: [ 2, 3 ]  # 2x3 affine transformation matrix per image
+  }
+]
+
+output [
+  {
+    name: "preprocessed_images"
+    data_type: TYPE_FP32
+    dims: [ 3, 640, 640 ]  # CHW format, normalized [0, 1]
+  }
+]
+
+# NVIDIA Best Practice: Use count=1 to avoid unnaturally increased memory consumption
+# See: https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/dali_backend/
+# TRACK D: Runs on container GPU 1 (host GPU 2) for benchmark isolation from Track E (GPU 0)
+instance_group [
+  {
+    count: 6
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+# Dynamic batching for DALI preprocessing (streaming: ultra-low latency)
+dynamic_batching {
+  preferred_batch_size: [ 2, 4, 8 ]
+  max_queue_delay_microseconds: 1000  # 1ms - ultra-low latency for real-time streaming
+  preserve_ordering: true  # Maintain frame order for video streams
+
+  # Queue policy to prevent server deadlock under high load
+  default_queue_policy {
+    timeout_action: REJECT
+    default_timeout_microseconds: 2000000  # 2 seconds - streaming needs fast fail
+    allow_timeout_override: false
+    max_queue_size: 64  # Smaller queue for low-latency streaming
+  }
+}
+
+parameters: {
+  key: "num_threads"
+  value: { string_value: "4" }
+}

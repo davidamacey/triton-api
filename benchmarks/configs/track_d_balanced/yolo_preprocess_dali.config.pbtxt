@@ -1,0 +1,70 @@
+# ============================================================================
+# BENCHMARK CONFIGURATION - EQUALIZED INSTANCES
+# ============================================================================
+# Model: yolo_preprocess_dali
+# Backend: dali
+# Instance count: 6 (standardized for fair comparison)
+# GPU: 0 (isolated benchmark mode)
+# ============================================================================
+#
+# Standard instance counts:
+#   - DALI preprocessing: 6 (I/O-bound, feeds GPU)
+#   - TRT inference: 4 (compute-bound)
+#   - Python backend: 4
+#
+# This config is used by isolated_benchmark.sh for fair testing.
+# Production configs remain in models/yolo_preprocess_dali/config.pbtxt
+# ============================================================================
+
+# Track D: YOLO Preprocessing - DALI Backend
+# GPU-accelerated preprocessing pipeline using affine transformation
+#
+# Pipeline: nvJPEG decode -> warp_affine -> Normalize -> CHW
+#
+# Note: Requires CPU calculation of affine matrices by client.
+# Client must compute letterbox parameters (scale, padding) and pass
+# as affine_matrices input [N, 2, 3] FP32.
+#
+# NVIDIA Best Practices:
+# - device="mixed" for image decoder (uses nvJPEG GPU acceleration)
+# - instance count=1 (count>1 causes unnaturally high memory usage)
+# - hw_decoder_load=0.65 (optimal for Ampere+ hardware decoder offload)
+
+name: "yolo_preprocess_dali"
+backend: "dali"
+max_batch_size: 128
+
+input [
+  {
+    name: "encoded_images"
+    data_type: TYPE_UINT8
+    dims: [ -1 ]  # Variable-length JPEG bytes
+  },
+  {
+    name: "affine_matrices"
+    data_type: TYPE_FP32
+    dims: [ 2, 3 ]  # Affine transformation matrix [2x3]
+  }
+]
+
+output [
+  {
+    name: "preprocessed_images"
+    data_type: TYPE_FP32
+    dims: [ 3, 640, 640 ]  # CHW format, normalized [0, 1]
+  }
+]
+
+# NVIDIA Best Practice: Use count=1 to avoid high memory consumption
+instance_group [
+  {
+    count: 6
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+parameters: {
+  key: "num_threads"
+  value: { string_value: "4" }
+}

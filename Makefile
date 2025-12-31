@@ -232,6 +232,102 @@ fmt-go: ## Format Go code with gofmt
 	@echo "✓ Code formatted"
 
 # ==================================================================================
+# Isolated Track Benchmarking (Fair Comparison)
+# ==================================================================================
+#
+# These targets run benchmarks with equalized GPU instances for fair comparison.
+# Each track is tested in isolation to prevent resource contention.
+#
+# Instance counts (equalized for fair comparison):
+#   - DALI preprocessing: 6 instances (I/O-bound, feeds GPU)
+#   - TRT inference: 4 instances (compute-bound)
+#   - Python backend: 4 instances
+#
+# ==================================================================================
+
+.PHONY: bench-create-configs
+bench-create-configs: ## Create equalized benchmark configurations (6 DALI, 4 TRT)
+	@echo "Creating equalized benchmark configurations..."
+	@python3 $(BENCHMARK_DIR)/create_benchmark_configs.py
+	@echo "✓ Benchmark configs created in $(BENCHMARK_DIR)/configs/"
+
+.PHONY: bench-isolated-all
+bench-isolated-all: ## Run isolated benchmarks on ALL tracks (equalized instances)
+	@echo "Running isolated benchmarks on all tracks..."
+	@echo "This will take approximately $$(echo "$(or $(DURATION),60) * 8 / 60" | bc) minutes"
+	@bash $(BENCHMARK_DIR)/isolated_benchmark.sh --all --duration $(or $(DURATION),60) --clients $(or $(CLIENTS),128)
+
+.PHONY: bench-isolated-track
+bench-isolated-track: ## Run isolated benchmark on single track (TRACK=A|B|C|D_streaming|D_balanced|D_batch|E|E_full)
+	@if [ -z "$(TRACK)" ]; then \
+		echo "Error: TRACK parameter required"; \
+		echo "Usage: make bench-isolated-track TRACK=D_batch"; \
+		echo ""; \
+		echo "Available tracks: A, B, C, D_streaming, D_balanced, D_batch, E, E_full"; \
+		exit 1; \
+	fi
+	@echo "Running isolated benchmark for Track $(TRACK)..."
+	@bash $(BENCHMARK_DIR)/isolated_benchmark.sh --track $(TRACK) --duration $(or $(DURATION),60) --clients $(or $(CLIENTS),128)
+
+.PHONY: bench-isolated-quick
+bench-isolated-quick: ## Quick isolated benchmarks (30s each, 64 clients, all tracks)
+	@echo "Running quick isolated benchmarks..."
+	@bash $(BENCHMARK_DIR)/isolated_benchmark.sh --all --duration 30 --clients 64
+
+.PHONY: bench-isolated-results
+bench-isolated-results: ## Aggregate and display isolated benchmark results
+	@echo "Aggregating isolated benchmark results..."
+	@python3 $(BENCHMARK_DIR)/aggregate_results.py --input $(BENCHMARK_DIR)/isolated
+
+.PHONY: bench-isolated-csv
+bench-isolated-csv: ## Export isolated benchmark results to CSV
+	@echo "Exporting benchmark results to CSV..."
+	@python3 $(BENCHMARK_DIR)/aggregate_results.py \
+		--input $(BENCHMARK_DIR)/isolated \
+		--csv $(BENCHMARK_DIR)/isolated/comparison_$(shell date +%Y%m%d_%H%M%S).csv
+
+.PHONY: bench-restore-production
+bench-restore-production: ## Restore production configurations after isolated benchmarks
+	@echo "Restoring production configurations..."
+	@for backup in models/*/config.pbtxt.production; do \
+		if [ -f "$$backup" ]; then \
+			target=$$(echo "$$backup" | sed 's/.production//'); \
+			cp "$$backup" "$$target"; \
+			rm "$$backup"; \
+			echo "Restored: $$(dirname $$backup | xargs basename)"; \
+		fi \
+	done
+	@echo "Production configurations restored."
+
+.PHONY: bench-isolated-help
+bench-isolated-help: ## Show help for isolated benchmark targets
+	@echo "================================================================================"
+	@echo "Isolated Track Benchmark Targets"
+	@echo "================================================================================"
+	@echo ""
+	@echo "These targets run fair benchmarks with equalized GPU instances:"
+	@echo "  - DALI preprocessing: 6 instances"
+	@echo "  - TRT inference: 4 instances"
+	@echo "  - Python backend: 4 instances"
+	@echo ""
+	@echo "Commands:"
+	@echo "  make bench-create-configs     Create equalized config files"
+	@echo "  make bench-isolated-all       Run all tracks sequentially (recommended)"
+	@echo "  make bench-isolated-track TRACK=X  Run single track in isolation"
+	@echo "  make bench-isolated-quick     Quick test (30s, 64 clients)"
+	@echo "  make bench-isolated-results   Aggregate and compare results"
+	@echo "  make bench-isolated-csv       Export results to CSV"
+	@echo ""
+	@echo "Parameters:"
+	@echo "  TRACK     - Track ID (A, B, C, D_streaming, D_balanced, D_batch, E, E_full)"
+	@echo "  DURATION  - Seconds per benchmark (default: 60)"
+	@echo "  CLIENTS   - Concurrent clients (default: 128)"
+	@echo ""
+	@echo "Example:"
+	@echo "  make bench-isolated-track TRACK=D_batch DURATION=120 CLIENTS=256"
+	@echo ""
+
+# ==================================================================================
 # Development and Testing
 # ==================================================================================
 

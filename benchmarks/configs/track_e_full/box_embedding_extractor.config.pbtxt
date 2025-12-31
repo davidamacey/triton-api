@@ -1,0 +1,147 @@
+# ============================================================================
+# BENCHMARK CONFIGURATION - EQUALIZED INSTANCES
+# ============================================================================
+# Model: box_embedding_extractor
+# Backend: python
+# Instance count: 4 (standardized for fair comparison)
+# GPU: 0 (isolated benchmark mode)
+# ============================================================================
+#
+# Standard instance counts:
+#   - DALI preprocessing: 6 (I/O-bound, feeds GPU)
+#   - TRT inference: 4 (compute-bound)
+#   - Python backend: 4
+#
+# This config is used by isolated_benchmark.sh for fair testing.
+# Production configs remain in models/box_embedding_extractor/config.pbtxt
+# ============================================================================
+
+# Track E: Box Embedding Extractor (Python Backend)
+#
+# Crops detected objects from original NATIVE-RESOLUTION image and generates
+# MobileCLIP embeddings for each object via BLS.
+#
+# Strategy: Native-resolution cropping (no upscale/downscale)
+#   - Receives original decoded image [3, H, W] at NATIVE resolution from DALI
+#   - No arbitrary resizing - preserves original quality (small images not upscaled)
+#   - Scales YOLO boxes from 640×640 space back to original space
+#   - Normalizes boxes to [0, 1] range (works with any image size)
+#   - Crops at original resolution for maximum quality
+#   - Resizes crops to 256×256 for MobileCLIP (following official guidelines)
+#   - Calls mobileclip2_s2_image_encoder via BLS
+#
+# Inputs:
+#   - original_image: [3, H, W] Native-resolution decoded image (variable H, W)
+#   - det_boxes: [300, 4] YOLO detections XYXY [x1, y1, x2, y2] (normalized or pixel coords)
+#   - num_dets: [1] Number of valid detections
+#   - affine_matrix: [2, 3] YOLO letterbox transformation (for scale extraction)
+#
+# Outputs:
+#   - box_embeddings: [300, 512] Per-object embeddings (zero-padded, MobileCLIP2-S2)
+#   - normalized_boxes: [300, 4] Boxes in [0, 1] range [x1, y1, x2, y2]
+
+name: "box_embedding_extractor"
+backend: "python"
+max_batch_size: 64  # Triton handles batching, Python backend processes each request
+
+input [
+  {
+    name: "original_image"
+    data_type: TYPE_FP32
+    dims: [3, -1, -1]  # Variable height and width
+  },
+  {
+    name: "det_boxes"
+    data_type: TYPE_FP32
+    dims: [300, 4]  # XYXY format: [x1, y1, x2, y2] - supports normalized [0,1] or pixel coords
+  },
+  {
+    name: "num_dets"
+    data_type: TYPE_INT32
+    dims: [1]
+  },
+  {
+    name: "affine_matrix"
+    data_type: TYPE_FP32
+    dims: [2, 3]  # Affine transformation matrix
+  }
+]
+
+output [
+  {
+    name: "box_embeddings"
+    data_type: TYPE_FP32
+    dims: [300, 512]  # Fixed size output (zero-padded), 512-dim MobileCLIP2-S2
+  },
+  {
+    name: "normalized_boxes"
+    data_type: TYPE_FP32
+    dims: [300, 4]  # Normalized boxes [x1, y1, x2, y2] in [0, 1] range
+  }
+]
+
+# Instance configuration
+# Using 4 instances for parallelism (BLS calls can overlap)
+instance_group [
+  {
+    count: 4
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+# Dynamic batching - REQUIRED for graceful failure under load
+# Without this, requests queue indefinitely in the Python backend
+dynamic_batching {
+  preferred_batch_size: [ 1, 2, 4 ]
+  max_queue_delay_microseconds: 5000  # 5ms - don't wait too long
+  preserve_ordering: false
+
+  default_queue_policy {
+    timeout_action: REJECT
+    default_timeout_microseconds: 5000000  # 5 seconds - match Track D
+    allow_timeout_override: false
+    max_queue_size: 128  # Match Track D - reject excess with HTTP 503
+  }
+}
+
+# Python backend configuration
+# Uses Triton's default Python environment (no custom env needed)
+
+# Optional: Enable model warmup
+# model_warmup {
+#   name: "warmup_sample"
+#   batch_size: 1
+#   inputs: {
+#     key: "original_image"
+#     value: {
+#       data_type: TYPE_FP32
+#       dims: [3, 1080, 1920]
+#       zero_data: true
+#     }
+#   }
+#   inputs: {
+#     key: "det_boxes"
+#     value: {
+#       data_type: TYPE_FP32
+#       dims: [300, 4]
+#       zero_data: true
+#     }
+#   }
+#   inputs: {
+#     key: "num_dets"
+#     value: {
+#       data_type: TYPE_INT32
+#       dims: [1]
+#       input_data_file: "warmup/num_dets"
+#     }
+#   }
+#   inputs: {
+#     key: "affine_matrix"
+#     value: {
+#       data_type: TYPE_FP32
+#       dims: [2, 3]
+#       zero_data: true
+#     }
+#   }
+# }

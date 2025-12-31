@@ -1,0 +1,83 @@
+# ============================================================================
+# BENCHMARK CONFIGURATION - EQUALIZED INSTANCES
+# ============================================================================
+# Model: dual_preprocess_dali
+# Backend: dali
+# Instance count: 6 (standardized for fair comparison)
+# GPU: 0 (isolated benchmark mode)
+# ============================================================================
+#
+# Standard instance counts:
+#   - DALI preprocessing: 6 (I/O-bound, feeds GPU)
+#   - TRT inference: 4 (compute-bound)
+#   - Python backend: 4
+#
+# This config is used by isolated_benchmark.sh for fair testing.
+# Production configs remain in models/dual_preprocess_dali/config.pbtxt
+# ============================================================================
+
+# Track E: Triple-Branch DALI Preprocessing
+# GPU-accelerated preprocessing for YOLO + MobileCLIP + HD Cropping
+#
+# Inputs:
+#   - encoded_images: JPEG/PNG bytes
+#   - affine_matrices: YOLO letterbox transformation [2, 3]
+#
+# Outputs:
+#   - yolo_images: [N, 3, 640, 640] FP32 - for object detection
+#   - clip_images: [N, 3, 256, 256] FP32 - for global embedding
+#   - original_images: [N, 3, H, W] FP32 - for cropping (max 1920px longest edge, no upscale)
+#
+# Memory footprint (original_images):
+#   - Max: 14.7MB per image (1920x1920 worst case for square)
+#   - Typical: 6-8MB per image (most photos are 16:9 or 3:2)
+#   - This HD cap prevents memory fragmentation at high concurrency (256+ workers)
+
+name: "dual_preprocess_dali"
+backend: "dali"
+max_batch_size: 128
+
+input [
+  {
+    name: "encoded_images"
+    data_type: TYPE_UINT8
+    dims: [ -1 ]  # Variable-length JPEG bytes
+  },
+  {
+    name: "affine_matrices"
+    data_type: TYPE_FP32
+    dims: [ 2, 3 ]  # Affine transformation matrix
+  }
+]
+
+output [
+  {
+    name: "yolo_images"
+    data_type: TYPE_FP32
+    dims: [ 3, 640, 640 ]
+  },
+  {
+    name: "clip_images"
+    data_type: TYPE_FP32
+    dims: [ 3, 256, 256 ]
+  },
+  {
+    name: "original_images"
+    data_type: TYPE_FP32
+    dims: [ 3, -1, -1 ]  # Variable dimensions [3, H, W]
+  }
+]
+
+# NVIDIA Best Practice: Single instance to avoid memory issues
+instance_group [
+  {
+    count: 6
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+parameters: {
+  key: "num_threads"
+  value: { string_value: "4" }
+}
