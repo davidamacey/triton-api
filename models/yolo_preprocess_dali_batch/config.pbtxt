@@ -39,12 +39,12 @@ output [
 
 # NVIDIA Best Practice: Use count=1 to avoid unnaturally increased memory consumption
 # See: https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/dali_backend/
-# TRACK D: Runs on container GPU 1 (host GPU 2) for benchmark isolation from Track E (GPU 0)
+# BENCHMARK: GPU 0 with 6 DALI instances (I/O bottleneck, needs more than TRT)
 instance_group [
   {
-    count: 8
+    count: 6
     kind: KIND_GPU
-    gpus: [ 1 ]
+    gpus: [ 0 ]
   }
 ]
 

@@ -7,7 +7,7 @@ max_batch_size: 64
 input [{ name: "images", data_type: TYPE_FP16, dims: [3,640,640] }]
 output [{ name: "output0", data_type: TYPE_FP16, dims: [84,8400] }]
 
-instance_group [{ count: 2, kind: KIND_GPU, gpus: [0] }]
+instance_group [{ count: 4, kind: KIND_GPU, gpus: [0] }]  # 4 instances to match Track A workers
 
 dynamic_batching {
   preferred_batch_size: [ 4, 8, 16, 32 ]

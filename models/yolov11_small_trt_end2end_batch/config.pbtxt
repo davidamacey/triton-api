@@ -42,12 +42,12 @@ output [
   }
 ]
 
-# TRACK D: Runs on container GPU 1 (host GPU 2) for benchmark isolation from Track E (GPU 0)
+# BENCHMARK: GPU 0 with 4 TRT instances (matches Track A workers)
 instance_group [
   {
     count: 4
     kind: KIND_GPU
-    gpus: [ 1 ]
+    gpus: [ 0 ]
   }
 ]
 
