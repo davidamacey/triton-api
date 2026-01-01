@@ -30,7 +30,7 @@ The system uses Docker Compose to orchestrate services with a **unified API arch
    - Exposes port **4607** (REST API)
    - Security disabled for development
 
-### Five Performance Tracks
+### Six Performance Tracks
 
 | Track | Endpoint Pattern | Backend | Speedup | Description |
 |-------|-----------------|---------|---------|-------------|
@@ -38,18 +38,43 @@ The system uses Docker Compose to orchestrate services with a **unified API arch
 | **B** | `/predict/{model}` | Triton TRT | 2x | TensorRT + CPU NMS |
 | **C** | `/predict/{model}_end2end` | Triton TRT | 4x | TensorRT + GPU NMS |
 | **D** | `/predict/{model}_gpu_e2e_*` | Triton DALI | 10-15x | Full GPU pipeline |
-| **E** | `/track_e/*` | Triton + OpenSearch | N/A | Visual search with MobileCLIP |
+| **E** | `/track_e/*` | Triton DALI + OpenSearch | N/A | Visual search with MobileCLIP (DALI preprocessing) |
+| **F** | `/track_f/*` | Triton TRT | N/A | Visual search with MobileCLIP (CPU preprocessing) |
 
 **Track D has 3 variants:**
 - `_gpu_e2e_streaming` - Low latency (video streaming)
 - `_gpu_e2e` - Balanced (general purpose)
 - `_gpu_e2e_batch` - Max throughput (batch processing)
 
-**Track E endpoints:**
+**Track E endpoints (DALI GPU preprocessing):**
+- `/track_e/predict` - YOLO + global embedding (single image)
+- `/track_e/predict_batch` - **Batch processing (up to 64 images per request)**
 - `/track_e/ingest` - Ingest images with embeddings
 - `/track_e/search/image` - Image-to-image similarity search
 - `/track_e/search/text` - Text-to-image search
 - `/track_e/search/object` - Object-level search
+
+**Track F endpoints (CPU preprocessing):**
+- `/track_f/predict` - YOLO + global embedding (direct TRT, no DALI)
+
+### DALI GPU Preprocessing Advantages
+
+**Benchmark Results (RTX A6000):**
+| Track | Preprocessing | Throughput | Notes |
+|-------|--------------|------------|-------|
+| E (DALI) | GPU | **130 RPS** | nvJPEG decode, GPU letterbox |
+| F (CPU) | CPU | 30 RPS | PIL decode, cv2 letterbox |
+
+**Why DALI is 4x faster than CPU preprocessing:**
+1. **GPU-accelerated decode**: nvJPEG is 10-20x faster than PIL/cv2
+2. **Parallel processing**: DALI processes multiple images concurrently on GPU
+3. **Zero CPU-GPU transfer**: Preprocessed tensors stay on GPU memory
+4. **Optimal batching**: Triton batches DALI requests efficiently
+
+**For large photo libraries (50K+ images):**
+- Use `/track_e/predict_batch` with batches of 16-64 images
+- Reduces HTTP overhead and ensures full GPU utilization
+- Expected throughput: 200+ images/second
 
 ### Model Communication Flow
 
@@ -85,6 +110,13 @@ PyTorch models are stored separately in `pytorch_models/` directory.
 ## Development Commands
 
 ### Deployment
+
+**IMPORTANT: Code Hot Reloading**
+- The `yolo-api` container uses volume mounts for `./src:/app/src` enabling hot reloading
+- **DO NOT rebuild containers** when changing Python code - just restart the service
+- To pick up code changes: `docker compose stop yolo-api && docker compose rm -f yolo-api && docker compose up -d yolo-api`
+- Simple `docker compose restart yolo-api` may not reload all modules due to Python bytecode caching
+- Only rebuild containers when `Dockerfile` or `requirements.txt` changes
 
 ```bash
 # Start all services (requires GPU)

@@ -40,30 +40,31 @@ output [
   }
 ]
 
-# High throughput configuration
+# High throughput configuration - OPTIMIZED for Track E
+# DALI is the bottleneck, so we maximize instances and reduce queue delay
 instance_group [
   {
-    count: 8
+    count: 12  # Optimal for stability and throughput
     kind: KIND_GPU
     gpus: [ 0 ]
   }
 ]
 
 dynamic_batching {
-  preferred_batch_size: [ 16, 32, 64 ]
-  max_queue_delay_microseconds: 100000  # 100ms - consistent across all tracks
+  preferred_batch_size: [ 8, 16, 32 ]  # Smaller batches for faster processing
+  max_queue_delay_microseconds: 25000  # 25ms - faster batch formation
   preserve_ordering: false
 
-  # Queue policy for high concurrency stress testing
+  # Queue policy for high concurrency
   default_queue_policy {
     timeout_action: REJECT
-    default_timeout_microseconds: 30000000  # 30 seconds for stress tests
+    default_timeout_microseconds: 30000000  # 30 seconds
     allow_timeout_override: false
-    max_queue_size: 2048  # High capacity for stress testing
+    max_queue_size: 4096  # Large queue for burst handling
   }
 }
 
 parameters: {
   key: "num_threads"
-  value: { string_value: "4" }
+  value: { string_value: "8" }  # More threads for parallel decode
 }

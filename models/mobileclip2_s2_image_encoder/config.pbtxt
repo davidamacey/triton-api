@@ -26,23 +26,23 @@ output [
 
 # Dynamic batching for maximum throughput
 dynamic_batching {
-  preferred_batch_size: [ 16, 32, 64 ]
-  max_queue_delay_microseconds: 100000  # 100ms - consistent across all tracks
+  preferred_batch_size: [ 8, 16, 32, 64 ]
+  max_queue_delay_microseconds: 25000  # 25ms - faster batch formation for Track E
   preserve_ordering: false
 
-  # Queue policy for high concurrency stress testing
+  # Queue policy for high concurrency
   default_queue_policy {
     timeout_action: REJECT
-    default_timeout_microseconds: 30000000  # 30 seconds for stress tests
+    default_timeout_microseconds: 30000000  # 30 seconds
     allow_timeout_override: false
-    max_queue_size: 2048  # High capacity for stress testing
+    max_queue_size: 4096
   }
 }
 
 # Multiple instances for parallel processing
 instance_group [
   {
-    count: 4
+    count: 4  # Optimal for stability and throughput
     kind: KIND_GPU
     gpus: [ 0 ]
   }

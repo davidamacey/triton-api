@@ -139,6 +139,69 @@ def predict_track_e_full(
 
 
 # =============================================================================
+# Batch Processing Endpoints (SYNC - for large photo libraries)
+# =============================================================================
+
+
+@router.post('/predict_batch', tags=['Track E: Batch Processing'])
+def predict_track_e_batch(
+    images: list[UploadFile] = File(..., description='Multiple image files (JPEG/PNG, max 64)'),
+):
+    """
+    Track E Batch: Process multiple images in a single request.
+
+    **Optimized for large photo libraries (50K+ images)**
+
+    Sends batch of images to DALI ensemble for parallel GPU processing.
+    Batch sizes of 16-64 images significantly improve throughput by:
+    - Reducing HTTP round-trip overhead
+    - Ensuring full DALI/TRT batch utilization (avg batch 8-16 vs 1.5)
+    - Maximizing GPU parallelism
+
+    **Performance comparison (RTX A6000):**
+    - Single-image requests: ~130 RPS @ 64 clients
+    - Batch-32 requests: ~200+ RPS expected
+
+    Args:
+        images: List of image files (max 64 per batch)
+
+    Returns:
+        List of detection + embedding results
+    """
+    try:
+        if len(images) > 64:
+            raise HTTPException(400, f'Max 64 images per batch, got {len(images)}')
+
+        if len(images) == 0:
+            raise HTTPException(400, 'At least 1 image required')
+
+        # Read all image bytes
+        start_time = time.time()
+        images_bytes = [img.file.read() for img in images]
+
+        inference_service = InferenceService()
+        results = inference_service.infer_track_e_batch(images_bytes)
+
+        batch_time_ms = (time.time() - start_time) * 1000
+        per_image_ms = batch_time_ms / len(images)
+
+        return {
+            'status': 'success',
+            'batch_size': len(images),
+            'results': results,
+            'batch_time_ms': round(batch_time_ms, 2),
+            'per_image_ms': round(per_image_ms, 2),
+            'throughput_ips': round(len(images) / (batch_time_ms / 1000), 1),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Track E batch prediction failed: {e}')
+        raise HTTPException(500, f'Batch prediction failed: {e!s}') from e
+
+
+# =============================================================================
 # Individual Model Endpoints (SYNC)
 # =============================================================================
 

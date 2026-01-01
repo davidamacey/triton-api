@@ -25,7 +25,14 @@ from ultralytics import YOLO
 
 from src.config import get_settings
 from src.core.dependencies import OpenSearchClientFactory, TritonClientFactory, app_state
-from src.routers import health_router, models_router, track_a_router, track_e_router, triton_router
+from src.routers import (
+    health_router,
+    models_router,
+    track_a_router,
+    track_e_router,
+    track_f_router,
+    triton_router,
+)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -140,10 +147,15 @@ def create_app() -> FastAPI:
         # Validate file size for upload endpoints
         if request.method == 'POST' and 'predict' in request.url.path:
             content_length = request.headers.get('content-length')
-            if content_length and int(content_length) > settings.max_file_size_bytes:
+            # Batch endpoints allow up to 10GB for large photo library processing
+            # Single image endpoints use default limit (50MB)
+            is_batch_endpoint = 'predict_batch' in request.url.path
+            max_size = 10 * 1024 * 1024 * 1024 if is_batch_endpoint else settings.max_file_size_bytes
+            max_size_label = '10GB' if is_batch_endpoint else f'{settings.max_file_size_mb}MB'
+            if content_length and int(content_length) > max_size:
                 raise HTTPException(
                     status_code=413,
-                    detail=f'File too large. Maximum: {settings.max_file_size_mb}MB',
+                    detail=f'File too large. Maximum: {max_size_label}',
                 )
 
         response = await call_next(request)
@@ -157,7 +169,8 @@ def create_app() -> FastAPI:
         # Inject timing into JSON response body for inference endpoints
         content_type = response.headers.get('content-type', '')
         is_inference_endpoint = any(
-            path in request.url.path for path in ['/predict', '/pytorch/predict', '/track_e/']
+            path in request.url.path
+            for path in ['/predict', '/pytorch/predict', '/track_e/', '/track_f/']
         )
 
         if 'application/json' in content_type and is_inference_endpoint:
@@ -207,6 +220,7 @@ def create_app() -> FastAPI:
     application.include_router(track_a_router)
     application.include_router(triton_router)
     application.include_router(track_e_router)
+    application.include_router(track_f_router)
     application.include_router(models_router)
 
     return application

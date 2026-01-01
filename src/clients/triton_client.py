@@ -445,6 +445,61 @@ class TritonClient:
 
         return result
 
+    def infer_track_e_batch(
+        self, images_bytes: list[bytes], max_workers: int = 32
+    ) -> list[dict[str, Any]]:
+        """
+        Track E batch inference: Process multiple images in parallel.
+
+        Uses ThreadPoolExecutor to send parallel requests to Triton,
+        which batches them via dynamic batching for optimal GPU utilization.
+
+        For large photo libraries (50K+ images), batch sizes of 16-64
+        significantly improve throughput by:
+        - Reducing HTTP overhead
+        - Ensuring full DALI/TRT batch utilization
+        - Maximizing GPU parallelism
+
+        Args:
+            images_bytes: List of raw JPEG/PNG bytes (up to 64 images)
+            max_workers: Max parallel threads (default 32)
+
+        Returns:
+            List of result dicts with detections and embeddings
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        batch_size = len(images_bytes)
+        if batch_size == 0:
+            return []
+
+        # Limit batch size to max_batch_size
+        if batch_size > 64:
+            logger.warning(f'Batch size {batch_size} exceeds max 64, truncating')
+            images_bytes = images_bytes[:64]
+            batch_size = 64
+
+        results = [None] * batch_size
+
+        def process_single(idx: int, img_bytes: bytes) -> tuple[int, dict]:
+            """Process a single image and return (index, result)."""
+            result = self.infer_track_e(img_bytes, full_pipeline=False)
+            return idx, result
+
+        # Process in parallel
+        workers = min(max_workers, batch_size)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(process_single, i, img): i
+                for i, img in enumerate(images_bytes)
+            }
+
+            for future in as_completed(futures):
+                idx, result = future.result()
+                results[idx] = result
+
+        return results
+
     # =========================================================================
     # Individual Model Inference (Track E Components)
     # =========================================================================
@@ -498,6 +553,170 @@ class TritonClient:
         )
 
         return response.as_numpy('text_embeddings')[0]
+
+    # =========================================================================
+    # Track F: CPU Preprocessing + Direct Model Calls (No DALI)
+    # =========================================================================
+    def infer_track_f(self, image_bytes: bytes) -> dict[str, Any]:
+        """
+        Track F: CPU preprocessing + direct YOLO TRT + MobileCLIP TRT calls.
+
+        Unlike Track E which uses DALI ensemble, Track F does:
+        1. CPU decode (PIL/cv2)
+        2. CPU letterbox for YOLO (640x640)
+        3. CPU resize/crop for CLIP (256x256)
+        4. Direct TRT inference for YOLO and CLIP
+
+        This allows comparison of CPU vs GPU preprocessing overhead,
+        and enables more TRT instances since DALI doesn't reserve VRAM.
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+
+        Returns:
+            Dict with detections and image embedding
+        """
+        # CPU decode image
+        img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        orig_w, orig_h = img.size
+        img_array = np.array(img)  # HWC, RGB, uint8
+
+        # ---- YOLO Preprocessing (CPU letterbox) ----
+        yolo_input, scale, padding = self._preprocess_yolo_cpu(img_array)
+
+        # ---- CLIP Preprocessing (CPU resize/crop) ----
+        clip_input = self._preprocess_clip_cpu(img_array)
+
+        # ---- Run YOLO TRT Inference ----
+        yolo_inputs = [InferInput('images', yolo_input.shape, 'FP32')]
+        yolo_inputs[0].set_data_from_numpy(yolo_input)
+        yolo_outputs = [
+            InferRequestedOutput('num_dets'),
+            InferRequestedOutput('det_boxes'),
+            InferRequestedOutput('det_scores'),
+            InferRequestedOutput('det_classes'),
+        ]
+        yolo_response = self._infer_with_retry(
+            'yolov11_small_trt_end2end', yolo_inputs, yolo_outputs
+        )
+
+        # ---- Run CLIP TRT Inference ----
+        clip_inputs = [InferInput('images', clip_input.shape, 'FP32')]
+        clip_inputs[0].set_data_from_numpy(clip_input)
+        clip_outputs = [InferRequestedOutput('image_embeddings')]
+        clip_response = self._infer_with_retry(
+            'mobileclip2_s2_image_encoder', clip_inputs, clip_outputs
+        )
+
+        # Parse YOLO outputs
+        num_dets = int(yolo_response.as_numpy('num_dets')[0][0])
+        boxes = yolo_response.as_numpy('det_boxes')[0][:num_dets]
+        scores = yolo_response.as_numpy('det_scores')[0][:num_dets]
+        classes = yolo_response.as_numpy('det_classes')[0][:num_dets]
+
+        # Parse CLIP output
+        image_embedding = clip_response.as_numpy('image_embeddings')[0]
+
+        return {
+            'num_dets': num_dets,
+            'boxes': boxes,
+            'scores': scores,
+            'classes': classes,
+            'image_embedding': image_embedding,
+            'orig_shape': (orig_h, orig_w),
+            'scale': scale,
+            'padding': padding,
+        }
+
+    def _preprocess_yolo_cpu(self, img_array: np.ndarray) -> tuple[np.ndarray, float, tuple]:
+        """
+        CPU letterbox preprocessing for YOLO (matches DALI output exactly).
+
+        Args:
+            img_array: HWC, RGB, uint8 numpy array
+
+        Returns:
+            Tuple of:
+            - preprocessed: [1, 3, 640, 640] FP32 normalized
+            - scale: float for inverse transform
+            - padding: (pad_x, pad_y) tuple
+        """
+        orig_h, orig_w = img_array.shape[:2]
+        target_size = self.input_size  # 640
+
+        # Calculate scale (don't upscale)
+        scale = min(target_size / orig_h, target_size / orig_w)
+        scale = min(scale, 1.0)
+
+        # New dimensions after scaling
+        new_w = round(orig_w * scale)
+        new_h = round(orig_h * scale)
+
+        # Resize using cv2 (faster than PIL for numpy arrays)
+        if scale < 1.0:
+            resized = cv2.resize(img_array, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        else:
+            resized = img_array
+
+        # Calculate padding
+        pad_w = (target_size - new_w) / 2.0
+        pad_h = (target_size - new_h) / 2.0
+        top, bottom = int(round(pad_h - 0.1)), int(round(pad_h + 0.1))
+        left, right = int(round(pad_w - 0.1)), int(round(pad_w + 0.1))
+
+        # Add padding (gray = 114)
+        letterboxed = cv2.copyMakeBorder(
+            resized, top, bottom, left, right,
+            cv2.BORDER_CONSTANT, value=(114, 114, 114)
+        )
+
+        # Ensure exact size (rounding may cause 1px difference)
+        if letterboxed.shape[:2] != (target_size, target_size):
+            letterboxed = cv2.resize(letterboxed, (target_size, target_size))
+
+        # Normalize to [0, 1]
+        normalized = letterboxed.astype(np.float32) / 255.0
+
+        # HWC -> CHW
+        transposed = np.transpose(normalized, (2, 0, 1))
+
+        # Add batch dimension
+        batched = np.expand_dims(transposed, axis=0)
+
+        return batched, scale, (pad_w, pad_h)
+
+    def _preprocess_clip_cpu(self, img_array: np.ndarray) -> np.ndarray:
+        """
+        CPU preprocessing for MobileCLIP (256x256, center crop).
+
+        Args:
+            img_array: HWC, RGB, uint8 numpy array
+
+        Returns:
+            Preprocessed array [1, 3, 256, 256] FP32
+        """
+        orig_h, orig_w = img_array.shape[:2]
+        target_size = 256
+
+        # Resize shortest edge to 256
+        scale = target_size / min(orig_h, orig_w)
+        new_w = int(orig_w * scale)
+        new_h = int(orig_h * scale)
+        resized = cv2.resize(img_array, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+        # Center crop to 256x256
+        start_x = (new_w - target_size) // 2
+        start_y = (new_h - target_size) // 2
+        cropped = resized[start_y:start_y + target_size, start_x:start_x + target_size]
+
+        # Normalize to [0, 1]
+        normalized = cropped.astype(np.float32) / 255.0
+
+        # HWC -> CHW
+        transposed = np.transpose(normalized, (2, 0, 1))
+
+        # Add batch dimension
+        return np.expand_dims(transposed, axis=0)
 
     # =========================================================================
     # Preprocessing Utilities

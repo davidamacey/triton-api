@@ -352,6 +352,94 @@ class InferenceService:
         """Async wrapper for Track E inference (for FastAPI endpoints)."""
         return self.infer_track_e(image_bytes, full_pipeline)
 
+    def infer_track_e_batch(
+        self,
+        images_bytes: list[bytes],
+        max_workers: int = 32,
+    ) -> list[dict[str, Any]]:
+        """
+        Track E batch inference: Process multiple images in parallel.
+
+        For large photo libraries (50K+ images), sending batches of 16-64
+        images per request significantly improves throughput by:
+        - Reducing HTTP round-trip overhead
+        - Ensuring full DALI/TRT batch utilization
+        - Maximizing GPU parallelism
+
+        Args:
+            images_bytes: List of raw JPEG/PNG bytes (up to 64 images)
+            max_workers: Max parallel inference threads
+
+        Returns:
+            List of standardized response dicts with embeddings
+        """
+        client = get_triton_client(self.settings.triton_url)
+        raw_results = client.infer_track_e_batch(images_bytes, max_workers)
+
+        # Format each result
+        formatted_results = []
+        for result in raw_results:
+            detections = client.format_detections(result)
+            orig_h, orig_w = result['orig_shape']
+            embedding = result['image_embedding']
+
+            formatted_results.append(
+                build_response(
+                    detections=detections,
+                    image_shape=(orig_h, orig_w),
+                    model_name='yolo_clip_ensemble',
+                    track='E_batch',
+                    backend='triton',
+                    preprocessing='gpu_dali',
+                    nms_location='gpu',
+                    embedding=embedding,
+                )
+            )
+
+        return formatted_results
+
+    # =========================================================================
+    # Track F: CPU Preprocessing + Direct TRT Models (No DALI)
+    # =========================================================================
+    def infer_track_f(self, image_bytes: bytes) -> dict[str, Any]:
+        """
+        Track F: CPU preprocessing + direct YOLO TRT + MobileCLIP TRT.
+
+        Unlike Track E (DALI ensemble), Track F uses:
+        - CPU decode (PIL)
+        - CPU letterbox for YOLO (custom, not Ultralytics)
+        - CPU resize/crop for CLIP (custom)
+        - Direct TRT inference (no ensemble scheduler overhead)
+
+        Benefits:
+        - Lower VRAM usage (no DALI instances)
+        - More TRT instances possible
+        - Baseline comparison for CPU vs GPU preprocessing
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+
+        Returns:
+            Standardized response dict with embeddings
+        """
+        client = get_triton_client(self.settings.triton_url)
+        result = client.infer_track_f(image_bytes)
+        detections = client.format_detections(result)
+
+        orig_h, orig_w = result['orig_shape']
+        embedding = result['image_embedding']
+
+        return build_response(
+            detections=detections,
+            image_shape=(orig_h, orig_w),
+            model_name='yolov11_small_trt_end2end + mobileclip2_s2',
+            track='F',
+            backend='triton',
+            preprocessing='cpu',
+            nms_location='gpu',
+            embedding=embedding,
+        )
+
     def encode_text_sync(self, text: str, use_cache: bool = True) -> np.ndarray:
         """
         Encode text to embedding using MobileCLIP text encoder.

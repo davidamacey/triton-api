@@ -91,6 +91,13 @@ type DetectionResponse struct {
 	Status     string                   `json:"status"`
 }
 
+// Track represents an inference track
+// IsBatch indicates if this track uses batch requests (multiple images per request)
+type TrackConfig struct {
+	IsBatch   bool
+	BatchSize int // Default batch size for this track
+}
+
 // All available tracks
 var allTracks = []Track{
 	{ID: "A", Name: "PyTorch Baseline", URL: "http://localhost:4603/pytorch/predict/small", Description: "Native PyTorch + CPU NMS"},
@@ -99,8 +106,19 @@ var allTracks = []Track{
 	{ID: "D_streaming", Name: "DALI+TRT Streaming", URL: "http://localhost:4603/predict/small_gpu_e2e_streaming", Description: "Full GPU (low latency)"},
 	{ID: "D_balanced", Name: "DALI+TRT Balanced", URL: "http://localhost:4603/predict/small_gpu_e2e", Description: "Full GPU (balanced)"},
 	{ID: "D_batch", Name: "DALI+TRT Batch", URL: "http://localhost:4603/predict/small_gpu_e2e_batch", Description: "Full GPU (max throughput)"},
-	{ID: "E", Name: "DALI+YOLO+CLIP (simple)", URL: "http://localhost:4603/track_e/predict", Description: "YOLO + global embedding (ensemble)"},
+	{ID: "E", Name: "DALI+YOLO+CLIP (simple)", URL: "http://localhost:4603/track_e/predict", Description: "YOLO + global embedding (single image)"},
 	{ID: "E_full", Name: "DALI+YOLO+CLIP (full)", URL: "http://localhost:4603/track_e/predict_full", Description: "YOLO + global + per-box embeddings"},
+	{ID: "E_batch16", Name: "DALI+YOLO+CLIP Batch-16", URL: "http://localhost:4603/track_e/predict_batch", Description: "Batch 16 images per request"},
+	{ID: "E_batch32", Name: "DALI+YOLO+CLIP Batch-32", URL: "http://localhost:4603/track_e/predict_batch", Description: "Batch 32 images per request"},
+	{ID: "E_batch64", Name: "DALI+YOLO+CLIP Batch-64", URL: "http://localhost:4603/track_e/predict_batch", Description: "Batch 64 images per request"},
+	{ID: "F", Name: "CPU+TRT Direct", URL: "http://localhost:4603/track_f/predict", Description: "CPU preprocessing + direct TRT (no DALI)"},
+}
+
+// Track configs for batch tracks
+var trackConfigs = map[string]TrackConfig{
+	"E_batch16": {IsBatch: true, BatchSize: 16},
+	"E_batch32": {IsBatch: true, BatchSize: 32},
+	"E_batch64": {IsBatch: true, BatchSize: 64},
 }
 
 func main() {
@@ -112,7 +130,7 @@ func main() {
 		clients       = flag.Int("clients", 64, "Number of concurrent clients")
 		duration      = flag.Int("duration", 60, "Test duration in seconds")
 		warmup        = flag.Int("warmup", 10, "Number of warmup requests per track")
-		track         = flag.String("track", "all", "Track filter (A, B, C, D_streaming, D_balanced, D_batch, E, E_full, or all)")
+		track         = flag.String("track", "all", "Track filter (A, B, C, D_*, E, E_full, E_batch16/32/64, F, or all)")
 		output        = flag.String("output", "results/benchmark_results.json", "Output JSON file")
 		quiet         = flag.Bool("quiet", false, "Quiet mode (minimal output)")
 		jsonOut       = flag.Bool("json", false, "JSON output only")
@@ -663,6 +681,13 @@ func runConcurrentTest(track Track, images [][]byte, clients int, duration int, 
 		wg              sync.WaitGroup
 	)
 
+	// Check if this is a batch track
+	trackConfig, isBatchTrack := trackConfigs[track.ID]
+	batchSize := 1
+	if isBatchTrack {
+		batchSize = trackConfig.BatchSize
+	}
+
 	client := createHTTPClient(clients)
 	startTime := time.Now()
 	endTime := startTime.Add(time.Duration(duration) * time.Second)
@@ -675,19 +700,47 @@ func runConcurrentTest(track Track, images [][]byte, clients int, duration int, 
 
 			requestCount := 0
 			for time.Now().Before(endTime) {
-				imageData := images[requestCount%len(images)]
+				if isBatchTrack {
+					// Batch mode: send multiple images per request
+					batchImages := make([][]byte, batchSize)
+					for j := 0; j < batchSize; j++ {
+						batchImages[j] = images[(requestCount*batchSize+j)%len(images)]
+					}
 
-				latency, ok := sendSingleRequest(client, track.URL, imageData, config)
+					latency, processedCount, ok := sendBatchRequest(client, track.URL, batchImages)
 
-				atomic.AddInt64(&totalRequests, 1)
+					// Count each image in the batch as a request
+					atomic.AddInt64(&totalRequests, int64(batchSize))
 
-				if ok {
-					atomic.AddInt64(&successRequests, 1)
-					latenciesMutex.Lock()
-					latencies = append(latencies, latency)
-					latenciesMutex.Unlock()
+					if ok {
+						atomic.AddInt64(&successRequests, int64(processedCount))
+						atomic.AddInt64(&failedRequests, int64(batchSize-processedCount))
+						// Record per-image latency for fair comparison
+						perImageLatency := latency / float64(processedCount)
+						latenciesMutex.Lock()
+						for k := 0; k < processedCount; k++ {
+							latencies = append(latencies, perImageLatency)
+						}
+						latenciesMutex.Unlock()
+					} else {
+						atomic.AddInt64(&failedRequests, int64(batchSize))
+					}
 				} else {
-					atomic.AddInt64(&failedRequests, 1)
+					// Single image mode
+					imageData := images[requestCount%len(images)]
+
+					latency, ok := sendSingleRequest(client, track.URL, imageData, config)
+
+					atomic.AddInt64(&totalRequests, 1)
+
+					if ok {
+						atomic.AddInt64(&successRequests, 1)
+						latenciesMutex.Lock()
+						latencies = append(latencies, latency)
+						latenciesMutex.Unlock()
+					} else {
+						atomic.AddInt64(&failedRequests, 1)
+					}
 				}
 
 				requestCount++
@@ -893,6 +946,69 @@ func sendSingleRequest(client *http.Client, url string, imageData []byte, config
 	}
 
 	return latency, true
+}
+
+// BatchResponse represents response from batch endpoint
+type BatchResponse struct {
+	Status        string `json:"status"`
+	BatchSize     int    `json:"batch_size"`
+	ThroughputIPS float64 `json:"throughput_ips"`
+}
+
+// sendBatchRequest sends multiple images in a single request
+// Returns: latency in ms, number of images processed, success
+func sendBatchRequest(client *http.Client, url string, imagesData [][]byte) (float64, int, bool) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	// Add all images to the multipart form
+	for i, imageData := range imagesData {
+		part, err := writer.CreateFormFile("images", fmt.Sprintf("image_%d.jpg", i))
+		if err != nil {
+			return 0, 0, false
+		}
+		if _, writeErr := part.Write(imageData); writeErr != nil {
+			return 0, 0, false
+		}
+	}
+
+	if closeErr := writer.Close(); closeErr != nil {
+		return 0, 0, false
+	}
+
+	req, err := http.NewRequest("POST", url, &buf)
+	if err != nil {
+		return 0, 0, false
+	}
+
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	latency := time.Since(start).Seconds() * 1000
+
+	if err != nil {
+		return 0, 0, false
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("Batch request failed: %d - %s\n", resp.StatusCode, string(body))
+		return 0, 0, false
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, 0, false
+	}
+
+	var batchResp BatchResponse
+	if err := json.Unmarshal(body, &batchResp); err != nil {
+		return 0, 0, false
+	}
+
+	return latency, batchResp.BatchSize, true
 }
 
 func runWarmup(track Track, images [][]byte, count int, quiet bool, config *BenchmarkConfig) {
