@@ -81,12 +81,12 @@ services:
       - ./pytorch_models:/app/pytorch_models
       - ./test_images:/app/test_images
       - ./reference_repos:/app/reference_repos  # Track E: MobileCLIP repos (persisted)
-      - ./cache/huggingface:/root/.cache/huggingface  # Track E: HuggingFace tokenizers (persistent)
+      - ./cache/huggingface:/home/appuser/.cache/huggingface  # Track E: HuggingFace tokenizers (appuser)
     environment:
       - ENABLE_PYTORCH=true  # Enable Track A for comparison testing
-      # HuggingFace cache configuration (industry standard)
-      - HF_HOME=/root/.cache/huggingface
-      - HF_HUB_CACHE=/root/.cache/huggingface/hub
+      # HuggingFace cache configuration (appuser home directory)
+      - HF_HOME=/home/appuser/.cache/huggingface
+      - HF_HUB_CACHE=/home/appuser/.cache/huggingface/hub
     shm_size: 8g
     stdin_open: true # Keep stdin open
     tty: true # Allocate a pseudo-TTY

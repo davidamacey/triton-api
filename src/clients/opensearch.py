@@ -259,11 +259,13 @@ class OpenSearchClient:
             )
 
             # Build document
+            from datetime import datetime, timezone
+
             doc = {
                 'image_id': image_id,
                 'image_path': image_path,
                 'global_embedding': global_embedding.tolist(),
-                'indexed_at': 'now',
+                'indexed_at': datetime.now(timezone.utc).isoformat(),
             }
 
             # Add box embeddings if provided
@@ -355,7 +357,9 @@ class OpenSearchClient:
                 for key in ['normalized_boxes', 'det_classes', 'det_scores']:
                     doc_copy.pop(key, None)
 
-                doc_copy['indexed_at'] = 'now'
+                from datetime import datetime, timezone
+
+                doc_copy['indexed_at'] = datetime.now(timezone.utc).isoformat()
 
                 actions.append(
                     {'_index': self.index_name, '_id': doc_copy['image_id'], '_source': doc_copy}
