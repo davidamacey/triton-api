@@ -52,15 +52,15 @@ instance_group [
 # Increased delay for 20MP images - allows queue to build up for better batching
 dynamic_batching {
   preferred_batch_size: [ 16, 32, 64 ]
-  max_queue_delay_microseconds: 200000  # 200ms - optimized for large (20MP) image batching
+  max_queue_delay_microseconds: 100000  # 100ms - balanced batching for stress testing
   preserve_ordering: false
 
-  # Queue policy to prevent server deadlock under high load
+  # Queue policy for high concurrency stress testing
   default_queue_policy {
     timeout_action: REJECT
-    default_timeout_microseconds: 10000000  # 10 seconds - handles 20MP image P99 latency
+    default_timeout_microseconds: 30000000  # 30 seconds for stress tests
     allow_timeout_override: false
-    max_queue_size: 256  # Reject excess requests gracefully (HTTP 503)
+    max_queue_size: 2048  # High capacity for stress testing
   }
 }
 

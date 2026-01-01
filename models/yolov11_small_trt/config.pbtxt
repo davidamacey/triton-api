@@ -10,14 +10,14 @@ output [{ name: "output0", data_type: TYPE_FP16, dims: [84,8400] }]
 instance_group [{ count: 4, kind: KIND_GPU, gpus: [0] }]  # 4 instances to match Track A workers
 
 dynamic_batching {
-  preferred_batch_size: [ 4, 8, 16, 32 ]
-  max_queue_delay_microseconds: 10000  # 10ms - balanced latency/throughput (industry best practice)
+  preferred_batch_size: [ 16, 32, 64 ]
+  max_queue_delay_microseconds: 100000  # 100ms - allow large batches under high load
   preserve_ordering: false
   default_queue_policy {
     timeout_action: REJECT
-    default_timeout_microseconds: 1000000
+    default_timeout_microseconds: 30000000  # 30 seconds for stress tests
     allow_timeout_override: false
-    max_queue_size: 128
+    max_queue_size: 2048  # High capacity for stress testing
   }
 }
 

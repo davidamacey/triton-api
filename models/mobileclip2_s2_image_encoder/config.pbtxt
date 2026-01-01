@@ -26,16 +26,16 @@ output [
 
 # Dynamic batching for maximum throughput
 dynamic_batching {
-  preferred_batch_size: [ 8, 16, 32, 64 ]
-  max_queue_delay_microseconds: 50000  # 50ms - match Track D batch settings
+  preferred_batch_size: [ 16, 32, 64 ]
+  max_queue_delay_microseconds: 100000  # 100ms - consistent across all tracks
   preserve_ordering: false
 
-  # Queue policy to prevent server deadlock under high load
+  # Queue policy for high concurrency stress testing
   default_queue_policy {
     timeout_action: REJECT
-    default_timeout_microseconds: 10000000  # 10 seconds - handles Track E embedding pipeline
+    default_timeout_microseconds: 30000000  # 30 seconds for stress tests
     allow_timeout_override: false
-    max_queue_size: 256  # Reject excess requests gracefully (HTTP 503)
+    max_queue_size: 2048  # High capacity for stress testing
   }
 }
 

@@ -2,17 +2,30 @@
 
 **Date:** 2025-12-31
 **Test Configuration:**
-- Images: 100 from `/mnt/nvm/KILLBOY_SAMPLE_PICTURES`
-- Duration: 30 seconds per concurrency level
-- Mode: Matrix (multiple concurrency levels)
+- Images: 1138 from `/mnt/nvm/KILLBOY_SAMPLE_PICTURES`
+- Duration: 60 seconds per concurrency level
+- Mode: Matrix stress test (high concurrency)
 - Isolated: Each track tested with ONLY its required models loaded
+- Queue delay: 100ms (all models)
+- Queue size: 2048 (stress testing capacity)
 
 ## Hardware
 - GPU 0: NVIDIA (49GB VRAM)
-- GPU 2: NVIDIA (49GB VRAM)
 - FastAPI Workers: 4 (for Track A PyTorch)
+- TRT Instances: 4 per model
+- DALI Instances: 6-8 per model
 
 ## Results Summary
+
+| Track | Peak RPS | @ Clients | Speedup | Avg Batch | Description |
+|-------|----------|-----------|---------|-----------|-------------|
+| **A** | 56.9 | 32 | 1.00x | N/A | PyTorch baseline |
+| **B** | 65.6 | 64 | 1.15x | 12.18 | TensorRT + CPU NMS |
+| **C** | 52.3 | 128 | 0.92x | 6.69 | TensorRT + GPU NMS |
+| **D_batch** | 103.8 | 256 | 1.82x | 1.65 | DALI + TRT End2End |
+| **E** | **123.3** | 64 | **2.17x** | 11.61 | YOLO + MobileCLIP |
+
+---
 
 ### Track A - PyTorch Baseline
 **Models loaded:** None (PyTorch in FastAPI workers)
@@ -21,93 +34,112 @@
 
 | Clients | Throughput | P50 (ms) | P95 (ms) | P99 (ms) | Success |
 |---------|------------|----------|----------|----------|---------|
-| 4 | 16.7 RPS | 231 | 261 | 313 | 100% |
-| 8 | 26.5 RPS | 242 | 287 | 3,194 | 100% |
-| 16 | **45.6 RPS** | 261 | 317 | 3,568 | 100% |
-| 32 | 43.6 RPS | 362 | 554 | 13,603 | 100% |
+| 16 | 26.2 RPS | 298 | 587 | 7,038 | 100% |
+| 32 | **56.9 RPS** | 451 | 555 | 3,692 | 100% |
+| 64 | 36.5 RPS | 847 | 7,417 | 22,781 | 99.7% |
+| 128 | 1.5 RPS | 20,275 | 29,745 | 29,891 | 38.6% |
 
-**Peak:** 45.6 RPS @ 16 clients
+**Peak:** 56.9 RPS @ 32 clients
+**Note:** Falls apart at 64+ clients (only 4 workers)
 
 ---
 
 ### Track B - TensorRT + CPU NMS
-**Models loaded:** yolov11_small_trt only (4 instances)
+**Models loaded:** yolov11_small_trt (4 instances)
 **GPU:** GPU 0
+**Avg Batch Size:** 12.18
 
 | Clients | Throughput | P50 (ms) | P95 (ms) | P99 (ms) | Success |
 |---------|------------|----------|----------|----------|---------|
-| 16 | 36.4 RPS | 428 | 536 | 638 | 100% |
-| 32 | **57.8 RPS** | 538 | 720 | 850 | 100% |
-| 64 | 51.5 RPS | 1,192 | 1,564 | 1,727 | 100% |
-| 128 | 52.3 RPS | 2,536 | 3,014 | 3,180 | 100% |
+| 64 | **65.6 RPS** | 952 | 1,249 | 1,443 | 100% |
+| 128 | 56.2 RPS | 2,225 | 2,653 | 2,828 | 100% |
+| 256 | 56.0 RPS | 4,351 | 6,010 | 6,503 | 100% |
+| 512 | 57.9 RPS | 8,335 | 10,278 | 11,387 | 100% |
 
-**Peak:** 57.8 RPS @ 32 clients
-**Speedup vs A:** 1.27x
+**Peak:** 65.6 RPS @ 64 clients
+**Speedup vs A:** 1.15x
 
 ---
 
 ### Track C - TensorRT + GPU NMS (End2End)
-**Models loaded:** yolov11_small_trt_end2end only (4 instances)
+**Models loaded:** yolov11_small_trt_end2end (4 instances)
 **GPU:** GPU 0
+**Avg Batch Size:** 6.69
 
 | Clients | Throughput | P50 (ms) | P95 (ms) | P99 (ms) | Success |
 |---------|------------|----------|----------|----------|---------|
-| 16 | 32.5 RPS | 481 | 597 | 665 | 100% |
-| 32 | 40.7 RPS | 775 | 1,005 | 1,196 | 100% |
-| 64 | 46.8 RPS | 1,317 | 1,728 | 1,962 | 100% |
-| 128 | **50.7 RPS** | 2,405 | 3,305 | 3,815 | 100% |
+| 64 | 48.9 RPS | 1,278 | 1,687 | 2,016 | 100% |
+| 128 | **52.3 RPS** | 2,429 | 3,200 | 3,535 | 100% |
+| 256 | 50.3 RPS | 4,852 | 5,973 | 6,553 | 100% |
+| 512 | 52.3 RPS | 9,265 | 10,675 | 11,303 | 100% |
 
-**Peak:** 50.7 RPS @ 128 clients
-**Speedup vs A:** 1.11x
+**Peak:** 52.3 RPS @ 128 clients
+**Speedup vs A:** 0.92x (slower due to GPU NMS overhead in this config)
 
 ---
 
 ### Track D_batch - DALI + TensorRT (Full GPU Pipeline)
-**Models loaded:** yolo_preprocess_dali_batch (6 instances) + yolov11_small_trt_end2end_batch (4 instances) + yolov11_small_gpu_e2e_batch
+**Models loaded:** yolo_preprocess_dali_batch (6 instances) + yolov11_small_trt_end2end_batch (4 instances)
 **GPU:** GPU 0
+**Avg Batch Size:** DALI 1.65, Ensemble 1.0 (not batching)
 
 | Clients | Throughput | P50 (ms) | P95 (ms) | P99 (ms) | Success |
 |---------|------------|----------|----------|----------|---------|
-| 16 | 32.2 RPS | 463 | 645 | 1,193 | 100% |
-| 32 | 90.7 RPS | 332 | 511 | 707 | 100% |
-| 64 | 93.7 RPS | 661 | 1,001 | 1,374 | 100% |
-| 128 | **98.0 RPS** | 1,247 | 1,744 | 2,364 | 100% |
+| 64 | 66.6 RPS | 878 | 1,563 | 1,812 | 99.9% |
+| 128 | 56.0 RPS | 2,178 | 3,441 | 3,786 | 99.5% |
+| 256 | **103.8 RPS** | 2,307 | 3,530 | 4,079 | 100% |
+| 512 | 95.9 RPS | 4,961 | 7,078 | 8,386 | 100% |
 
-**Peak:** 98.0 RPS @ 128 clients
-**Speedup vs A:** 2.15x
+**Peak:** 103.8 RPS @ 256 clients
+**Speedup vs A:** 1.82x
+**Note:** Ensemble scheduler processes requests individually (batch=1), child models batch internally
 
 ---
 
 ### Track E - Visual Search (YOLO + MobileCLIP)
-**Models loaded:** yolo_clip_ensemble + yolo_clip_preprocess_dali + yolov11_small_trt_end2end + mobileclip2_s2_image_encoder
+**Models loaded:** yolo_clip_ensemble + yolo_clip_preprocess_dali (8 instances) + yolov11_small_trt_end2end (4 instances) + mobileclip2_s2_image_encoder (4 instances)
 **GPU:** GPU 0
+**Avg Batch Size:** YOLO 11.61, MobileCLIP 11.61
 
 | Clients | Throughput | P50 (ms) | P95 (ms) | P99 (ms) | Success |
 |---------|------------|----------|----------|----------|---------|
-| 16 | 52.4 RPS | 286 | 429 | 661 | 99.9% |
-| 32 | **77.4 RPS** | 368 | 705 | 1,010 | 100% |
-| 64 | 51.0 RPS | 1,203 | 1,895 | 2,126 | 99.1% |
-| 128 | 73.3 RPS | 1,664 | 2,586 | 3,210 | 100% |
+| 64 | **123.3 RPS** | 489 | 744 | 964 | 100% |
+| 128 | 117.9 RPS | 1,038 | 1,448 | 2,091 | 100% |
+| 256 | 101.8 RPS | 2,354 | 3,349 | 4,489 | 99.5% |
+| 512 | 62.8 RPS | 6,704 | 11,898 | 16,603 | 93.5% |
 
-**Peak:** 77.4 RPS @ 32 clients
-**Speedup vs A:** 1.70x
-**Note:** Track E performs YOLO detection + MobileCLIP embedding extraction (more compute than detection-only tracks)
+**Peak:** 123.3 RPS @ 64 clients
+**Speedup vs A:** 2.17x
+**Note:** Best performer! YOLO + CLIP extraction with excellent batching (11.61 avg)
 
 ---
 
 ## Key Observations
 
-1. **Track A (PyTorch):** Baseline at 45.6 RPS with 4 workers. Optimal at 16 clients.
+1. **Track E (YOLO+CLIP) is fastest:** 123.3 RPS with 2.17x speedup. Excellent batching (11.61 avg) on child models makes this the best performer.
 
-2. **Track B (TRT + CPU NMS):** 1.27x speedup. Optimal at 32 clients. CPU NMS parallelism helps at mid-concurrency.
+2. **Track D_batch (DALI+TRT):** 103.8 RPS with 1.82x speedup. Full GPU pipeline works well at high concurrency (256+ clients).
 
-3. **Track C (TRT + GPU NMS):** 1.11x speedup. Scales to high concurrency (peak at 128 clients). GPU NMS reduces CPU overhead.
+3. **Track B (TRT + CPU NMS):** 65.6 RPS with 1.15x speedup. Good batching (12.18 avg) but CPU NMS limits scalability.
 
-4. **Track D_batch (DALI + TRT):** **2.15x speedup** - Best performer! Full GPU pipeline eliminates CPU preprocessing bottleneck. DALI batching (6 instances) combined with TRT (4 instances) achieves 98 RPS.
+4. **Track C (TRT + GPU NMS):** 52.3 RPS, actually slower than baseline. GPU NMS adds overhead in this configuration.
 
-5. **Track E (Visual Search):** 1.70x speedup despite extra CLIP embedding computation. Peak at 32 clients.
+5. **Track A (PyTorch):** Baseline at 56.9 RPS. Collapses at 64+ clients due to 4 worker limit.
 
-6. **100% Success Rate:** All tracks achieved ~100% success at all concurrency levels when properly isolated.
+6. **Batching Architecture:**
+   - Ensemble scheduler processes requests individually (batch=1)
+   - Child models (YOLO TRT, MobileCLIP) batch internally via dynamic batching
+   - Best results when child models have high batch utilization
+
+## Configuration Changes Made
+
+```bash
+# All models updated with:
+max_queue_delay_microseconds: 100000  # 100ms
+max_queue_size: 2048
+preferred_batch_size: [16, 32, 64]
+timeout: 30 seconds
+```
 
 ## Test Commands
 
@@ -115,9 +147,9 @@
 # Unload all models
 bash unload_all.sh
 
-# Load specific model for isolated test
+# Load specific track models
 curl -X POST "http://localhost:4600/v2/repository/models/MODEL_NAME/load"
 
-# Run matrix benchmark
-./triton_bench --mode matrix --track TRACK --matrix-clients 16,32,64,128 --duration 30
+# Run stress test with all images
+./triton_bench --mode matrix --track TRACK --limit 1138 --matrix-clients 64,128,256,512 --duration 60
 ```

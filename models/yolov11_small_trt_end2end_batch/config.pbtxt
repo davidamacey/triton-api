@@ -52,15 +52,15 @@ instance_group [
 ]
 
 dynamic_batching {
-  preferred_batch_size: [ 8, 16, 32, 64 ]
-  max_queue_delay_microseconds: 50000  # 50ms - max throughput for batch processing
+  preferred_batch_size: [ 16, 32, 64 ]
+  max_queue_delay_microseconds: 100000  # 100ms - allow large batches under high load
   preserve_ordering: false
 
   default_queue_policy {
     timeout_action: REJECT
-    default_timeout_microseconds: 10000000  # 10 seconds - handles 20MP image P99 latency
+    default_timeout_microseconds: 30000000  # 30 seconds for stress tests
     allow_timeout_override: false
-    max_queue_size: 128
+    max_queue_size: 2048  # High capacity for stress testing
   }
 }
 
