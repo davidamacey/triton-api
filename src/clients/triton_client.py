@@ -32,6 +32,7 @@ from src.utils.affine import (
     format_detections_from_triton,
     get_jpeg_dimensions_fast,
 )
+from src.utils.retry import retry_sync
 
 
 logger = logging.getLogger(__name__)
@@ -50,17 +51,60 @@ class TritonClient:
     - Track E: YOLO + MobileCLIP ensemble (visual search)
     """
 
-    def __init__(self, triton_url: str = 'triton-api:8001'):
+    def __init__(
+        self,
+        triton_url: str = 'triton-api:8001',
+        max_retries: int = 3,
+        retry_base_delay: float = 0.1,
+        retry_max_delay: float = 5.0,
+    ):
         """
-        Initialize unified Triton client.
+        Initialize unified Triton client with retry support.
 
         Args:
             triton_url: Triton gRPC endpoint
+            max_retries: Maximum retry attempts for failed requests
+            retry_base_delay: Initial retry delay in seconds
+            retry_max_delay: Maximum retry delay in seconds
         """
         self.triton_url = triton_url
         self.client = TritonClientManager.get_sync_client(triton_url)
         self.input_size = 640  # YOLO input size
-        logger.info('Unified Triton client initialized (sync, backpressure-safe)')
+        self.max_retries = max_retries
+        self.retry_base_delay = retry_base_delay
+        self.retry_max_delay = retry_max_delay
+        logger.info(
+            f'Unified Triton client initialized (sync, retries={max_retries})'
+        )
+
+    def _infer_with_retry(self, model_name: str, inputs: list, outputs: list):
+        """
+        Execute Triton inference with automatic retry on transient failures.
+
+        Retries on: queue full, resource exhausted, timeout, unavailable.
+        Does NOT retry on: invalid input, model not found, etc.
+
+        Args:
+            model_name: Triton model name
+            inputs: List of InferInput objects
+            outputs: List of InferRequestedOutput objects
+
+        Returns:
+            InferResult from Triton
+
+        Raises:
+            RetryExhaustedError: If all retries exhausted
+            Exception: For non-retryable errors
+        """
+        return retry_sync(
+            self.client.infer,
+            model_name=model_name,
+            inputs=inputs,
+            outputs=outputs,
+            max_retries=self.max_retries,
+            base_delay=self.retry_base_delay,
+            max_delay=self.retry_max_delay,
+        )
 
     # =========================================================================
     # Track C: End2End TRT (CPU Preprocessing + GPU NMS)
@@ -120,8 +164,8 @@ class TritonClient:
             InferRequestedOutput('det_classes'),
         ]
 
-        # Run inference
-        response = self.client.infer(model_name=model_name, inputs=inputs, outputs=outputs)
+        # Run inference with retry
+        response = self._infer_with_retry(model_name, inputs, outputs)
 
         # Parse outputs
         num_dets = int(response.as_numpy('num_dets')[0][0])
@@ -201,8 +245,8 @@ class TritonClient:
             InferRequestedOutput('det_classes'),
         ]
 
-        # Run inference
-        response = self.client.infer(model_name=model_name, inputs=inputs, outputs=outputs)
+        # Run inference with retry
+        response = self._infer_with_retry(model_name, inputs, outputs)
 
         # Parse batch outputs
         num_dets_batch = response.as_numpy('num_dets')
@@ -281,8 +325,8 @@ class TritonClient:
             InferRequestedOutput('det_classes'),
         ]
 
-        # Run inference
-        response = self.client.infer(model_name=model_name, inputs=inputs, outputs=outputs)
+        # Run inference with retry
+        response = self._infer_with_retry(model_name, inputs, outputs)
 
         # Parse outputs
         num_dets = int(response.as_numpy('num_dets')[0][0])
@@ -365,8 +409,8 @@ class TritonClient:
                 InferRequestedOutput('global_embeddings'),
             ]
 
-        # Sync inference - proper backpressure handling
-        response = self.client.infer(model_name=ensemble_name, inputs=inputs, outputs=outputs)
+        # Sync inference with retry - proper backpressure handling
+        response = self._infer_with_retry(ensemble_name, inputs, outputs)
 
         # Parse outputs
         num_dets = int(response.as_numpy('num_dets')[0][0])
@@ -424,9 +468,9 @@ class TritonClient:
         # Output
         output = InferRequestedOutput('image_embeddings')
 
-        # Sync inference
-        response = self.client.infer(
-            model_name='mobileclip2_s2_image_encoder', inputs=[input_tensor], outputs=[output]
+        # Sync inference with retry
+        response = self._infer_with_retry(
+            'mobileclip2_s2_image_encoder', [input_tensor], [output]
         )
 
         return response.as_numpy('image_embeddings')[0]
@@ -448,9 +492,9 @@ class TritonClient:
         # Output
         output = InferRequestedOutput('text_embeddings')
 
-        # Sync inference
-        response = self.client.infer(
-            model_name='mobileclip2_s2_text_encoder', inputs=[input_tensor], outputs=[output]
+        # Sync inference with retry
+        response = self._infer_with_retry(
+            'mobileclip2_s2_text_encoder', [input_tensor], [output]
         )
 
         return response.as_numpy('text_embeddings')[0]
