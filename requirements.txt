@@ -58,3 +58,6 @@ transformers>=4.30.0  # CLIP tokenizer for text-to-image search
 timm  # pytorch-image-models - required for MobileCLIP architecture
 huggingface_hub  # For downloading MobileCLIP checkpoints
 ftfy  # Text cleaning for CLIP tokenizer (required by open_clip)
+
+# Track E: FAISS Clustering (GPU-accelerated vector clustering)
+faiss-gpu-cu12>=1.10.0  # FAISS GPU for billion-scale clustering (CUDA 12)

@@ -33,8 +33,6 @@ from src.schemas.detection import ImageMetadata, ModelMetadata
 from src.schemas.track_e import (
     DetectOnlyResponse,
     ImageEmbeddingResponse,
-    ImageIngestResponse,
-    IndexStatsResponse,
     PredictFullResponse,
     PredictResponse,
     TextEmbeddingResponse,
@@ -320,7 +318,7 @@ def detect_only(
 # =============================================================================
 
 
-@router.post('/ingest', response_model=ImageIngestResponse)
+@router.post('/ingest')
 async def ingest_image(
     search_service: VisualSearchDep,
     file: UploadFile = File(..., description='Image file (JPEG/PNG)'),
@@ -331,17 +329,23 @@ async def ingest_image(
     metadata: str | None = Query(None, description='JSON string for metadata'),
 ):
     """
-    Ingest image into visual search index.
+    Ingest image into visual search indexes with auto-routing.
 
     Pipeline:
     1. Run Track E ensemble (YOLO + MobileCLIP) for embeddings
-    2. Index global + per-box embeddings in OpenSearch
+    2. Route to appropriate indexes:
+       - Global embedding → visual_search_global
+       - Person detections → visual_search_people
+       - Vehicle detections → visual_search_vehicles
 
     Args:
         file: Image file (JPEG/PNG)
         image_id: Unique identifier (auto-generated if not provided)
         image_path: File path for retrieval (defaults to image_id)
         metadata: JSON string for custom metadata
+
+    Returns:
+        Ingestion result with counts per category
     """
     try:
         if not file.content_type or not file.content_type.startswith('image/'):
@@ -349,15 +353,12 @@ async def ingest_image(
 
         image_bytes = file.file.read()
 
-        # Generate image_id if not provided
         if image_id is None:
             image_id = f'img_{uuid.uuid4().hex[:12]}'
 
-        # Parse metadata
         metadata_dict = json.loads(metadata) if metadata else {}
         metadata_dict['filename'] = file.filename
 
-        # Use VisualSearchService (inference + OpenSearch indexing)
         result = await search_service.ingest_image(
             image_bytes=image_bytes,
             image_id=image_id,
@@ -368,13 +369,23 @@ async def ingest_image(
         if result['status'] == 'error':
             raise HTTPException(500, result.get('error', 'Ingestion failed'))
 
-        return ImageIngestResponse(
-            status='success',
-            image_id=image_id,
-            message=f'Ingested with {result["num_detections"]} detections',
-            num_detections=result['num_detections'],
-            global_embedding_norm=result.get('embedding_norm', 0.0),
-        )
+        indexed = result.get('indexed', {})
+        return {
+            'status': 'success',
+            'image_id': image_id,
+            'num_detections': result['num_detections'],
+            'embedding_norm': result.get('embedding_norm', 0.0),
+            'indexed': {
+                'global': indexed.get('global', False),
+                'vehicles': indexed.get('vehicles', 0),
+                'people': indexed.get('people', 0),
+                'skipped': indexed.get('skipped', 0),
+            },
+            'message': (
+                f'Indexed: global + {indexed.get("vehicles", 0)} vehicles + '
+                f'{indexed.get("people", 0)} people'
+            ),
+        }
 
     except HTTPException:
         raise
@@ -490,29 +501,28 @@ async def search_by_object(
     class_filter: str | None = Query(None, description='Comma-separated class IDs to filter'),
 ):
     """
-    Object-to-object search using per-box embeddings.
+    Object-to-object search with auto-routing to category index.
 
-    Pipeline:
-    1. Run Track E full ensemble to get per-box embeddings
-    2. Use specified box's embedding for nested k-NN search
+    Automatically routes to the appropriate index based on detected class:
+    - Person (class 0) → visual_search_people
+    - Vehicles (2,3,5,7,8) → visual_search_vehicles
+    - Other → visual_search_global (fallback)
 
     Args:
         image: Query image file
         box_index: Index of detected object to use for search (0 = first detection)
         top_k: Number of results to return
         min_score: Minimum similarity score threshold
-        class_filter: Comma-separated class IDs to filter (e.g., "0,15,62" for person, cat, tv)
+        class_filter: Comma-separated class IDs to filter (e.g., "2,7" for cars and trucks)
     """
     try:
         start_time = time.time()
         image_bytes = image.file.read()
 
-        # Parse class filter
         class_ids = None
         if class_filter:
             class_ids = [int(c.strip()) for c in class_filter.split(',')]
 
-        # Use VisualSearchService (inference + OpenSearch search)
         result = await search_service.search_by_object(
             image_bytes=image_bytes,
             box_index=box_index,
@@ -541,58 +551,530 @@ async def search_by_object(
         raise HTTPException(500, f'Search failed: {e!s}') from e
 
 
+@router.post('/search/vehicles', response_model=VisualSearchResponse)
+async def search_vehicles(
+    search_service: VisualSearchDep,
+    image: UploadFile = File(..., description='Query image with vehicle'),
+    vehicle_index: int = Query(0, ge=0, description='Which vehicle to search (0 = first)'),
+    top_k: int = Query(10, ge=1, le=100, description='Number of results'),
+    min_score: float | None = Query(None, ge=0.0, le=1.0, description='Minimum score'),
+    vehicle_type: str | None = Query(
+        None, description='Filter: car,motorcycle,bus,truck,boat (comma-separated)'
+    ),
+):
+    """
+    Find similar vehicles across all indexed images.
+
+    Like "Find all red cars" or "Show me motorcycles like this one".
+
+    Vehicle classes (COCO):
+    - 2 = car
+    - 3 = motorcycle
+    - 5 = bus
+    - 7 = truck
+    - 8 = boat
+
+    Args:
+        image: Query image containing a vehicle
+        vehicle_index: Which detected vehicle to use (0 = first vehicle found)
+        top_k: Number of results to return
+        min_score: Minimum similarity score threshold
+        vehicle_type: Filter by vehicle type (e.g., "car,truck")
+    """
+    try:
+        start_time = time.time()
+        image_bytes = image.file.read()
+
+        # Parse vehicle type filter
+        class_filter = None
+        if vehicle_type:
+            type_to_class = {'car': 2, 'motorcycle': 3, 'bus': 5, 'truck': 7, 'boat': 8}
+            class_filter = [
+                type_to_class[t.strip().lower()]
+                for t in vehicle_type.split(',')
+                if t.strip().lower() in type_to_class
+            ]
+
+        result = await search_service.search_vehicles(
+            image_bytes=image_bytes,
+            box_index=vehicle_index,
+            top_k=top_k,
+            min_score=min_score,
+            class_filter=class_filter,
+        )
+
+        if result['status'] == 'error':
+            raise HTTPException(400, result.get('error', 'Search failed'))
+
+        search_time = (time.time() - start_time) * 1000
+
+        return VisualSearchResponse(
+            status='success',
+            query_type='vehicle',
+            results=result['results'],
+            total_results=len(result['results']),
+            search_time_ms=search_time,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Vehicle search failed: {e}')
+        raise HTTPException(500, f'Search failed: {e!s}') from e
+
+
+@router.post('/search/people', response_model=VisualSearchResponse)
+async def search_people(
+    search_service: VisualSearchDep,
+    image: UploadFile = File(..., description='Query image with person'),
+    person_index: int = Query(0, ge=0, description='Which person to search (0 = first)'),
+    top_k: int = Query(10, ge=1, le=100, description='Number of results'),
+    min_score: float | None = Query(None, ge=0.0, le=1.0, description='Minimum score'),
+):
+    """
+    Find similar people by appearance (clothing, pose, context).
+
+    Like "Find people wearing similar outfits" - matches visual appearance.
+    NOT identity matching (use /search/faces for that - requires ArcFace).
+
+    Args:
+        image: Query image containing a person
+        person_index: Which detected person to use (0 = first person found)
+        top_k: Number of results to return
+        min_score: Minimum similarity score threshold
+    """
+    try:
+        start_time = time.time()
+        image_bytes = image.file.read()
+
+        result = await search_service.search_people(
+            image_bytes=image_bytes,
+            box_index=person_index,
+            top_k=top_k,
+            min_score=min_score,
+        )
+
+        if result['status'] == 'error':
+            raise HTTPException(400, result.get('error', 'Search failed'))
+
+        search_time = (time.time() - start_time) * 1000
+
+        return VisualSearchResponse(
+            status='success',
+            query_type='person',
+            results=result['results'],
+            total_results=len(result['results']),
+            search_time_ms=search_time,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'People search failed: {e}')
+        raise HTTPException(500, f'Search failed: {e!s}') from e
+
+
 # =============================================================================
 # Index Management Endpoints (lightweight, keep sync)
 # =============================================================================
 
 
-@router.get('/index/stats', response_model=IndexStatsResponse)
+@router.get('/index/stats')
 async def get_index_stats(search_service: VisualSearchDep):
-    """Get visual search index statistics."""
+    """
+    Get statistics for all visual search indexes.
+
+    Returns counts and sizes for:
+    - visual_search_global: Whole image embeddings
+    - visual_search_vehicles: Vehicle detections
+    - visual_search_people: Person detections
+    - visual_search_faces: Face embeddings (future)
+    """
     try:
-        stats = await search_service.get_index_stats()
-        return IndexStatsResponse(
-            status=stats.get('status', 'success'),
-            total_documents=stats.get('total_documents', 0),
-            index_size_mb=stats.get('index_size_mb', 0.0),
-        )
+        return await search_service.get_index_stats()
     except Exception as e:
         logger.error(f'Failed to get index stats: {e}')
-        return IndexStatsResponse(status='error', total_documents=0, index_size_mb=0.0)
+        return {'status': 'error', 'error': str(e)}
 
 
 @router.post('/index/create')
 async def create_index(
     search_service: VisualSearchDep,
-    force_recreate: bool = Query(False, description='Delete existing index first'),
+    force_recreate: bool = Query(False, description='Delete existing indexes first'),
 ):
     """
-    Create or recreate the visual search index.
+    Create all visual search indexes.
+
+    Creates:
+    - visual_search_global: Whole image similarity
+    - visual_search_vehicles: Vehicle detections
+    - visual_search_people: Person detections
+    - visual_search_faces: Face identity matching (future)
 
     Args:
-        force_recreate: Whether to delete existing index before creating
+        force_recreate: Whether to delete existing indexes before creating
     """
     try:
-        success = await search_service.setup_index(force_recreate=force_recreate)
-        if success:
-            return {'status': 'success', 'message': 'Index created successfully'}
-        return {'status': 'error', 'message': 'Failed to create index'}
+        results = await search_service.setup_index(force_recreate=force_recreate)
+        all_success = all(results.values())
+        return {
+            'status': 'success' if all_success else 'partial',
+            'indexes': results,
+            'message': 'All indexes created' if all_success else 'Some indexes failed',
+        }
     except Exception as e:
-        logger.error(f'Failed to create index: {e}')
-        raise HTTPException(500, f'Failed to create index: {e!s}') from e
+        logger.error(f'Failed to create indexes: {e}')
+        raise HTTPException(500, f'Failed to create indexes: {e!s}') from e
 
 
 @router.delete('/index')
 async def delete_index(search_service: VisualSearchDep):
-    """Delete the visual search index."""
+    """Delete all visual search indexes."""
     try:
-        success = await search_service.delete_index()
-        if success:
-            return {'status': 'success', 'message': 'Index deleted successfully'}
-        return {'status': 'error', 'message': 'Failed to delete index'}
+        results = await search_service.delete_index()
+        all_success = all(results.values())
+        return {
+            'status': 'success' if all_success else 'partial',
+            'indexes': results,
+            'message': 'All indexes deleted' if all_success else 'Some indexes failed',
+        }
     except Exception as e:
-        logger.error(f'Failed to delete index: {e}')
-        raise HTTPException(500, f'Failed to delete index: {e!s}') from e
+        logger.error(f'Failed to delete indexes: {e}')
+        raise HTTPException(500, f'Failed to delete indexes: {e!s}') from e
+
+
+# =============================================================================
+# Clustering Endpoints (FAISS IVF - Industry Standard)
+# =============================================================================
+
+
+@router.post('/clusters/train/{index_name}', tags=['Track E: Clustering'])
+async def train_clusters(
+    search_service: VisualSearchDep,
+    index_name: str,
+    n_clusters: int | None = Query(None, description='Number of clusters (uses default if None)'),
+    max_samples: int | None = Query(None, description='Max embeddings for training (None = all)'),
+):
+    """
+    Train FAISS IVF clustering for an index.
+
+    This is typically a one-time operation or run periodically for rebalancing.
+    Training time scales with embedding count:
+    - 100K: ~2s
+    - 1M: ~15s
+    - 10M: ~120s
+
+    Args:
+        index_name: Which index to train (global, vehicles, people, faces)
+        n_clusters: Number of clusters (default: 1024 for global/faces, 512 for people, 256 for vehicles)
+        max_samples: Max samples for training (None = use all)
+    """
+    try:
+        return await search_service.train_clusters(
+            index_name=index_name,
+            n_clusters=n_clusters,
+            max_samples=max_samples,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        logger.error(f'Cluster training failed: {e}')
+        raise HTTPException(500, f'Training failed: {e!s}') from e
+
+
+@router.post('/clusters/assign/{index_name}', tags=['Track E: Clustering'])
+async def assign_unclustered(
+    search_service: VisualSearchDep,
+    index_name: str,
+):
+    """
+    Assign clusters to unclustered documents in an index.
+
+    Finds all documents without cluster_id and assigns them to the nearest
+    centroid. This is useful after ingesting new images without clustering enabled.
+
+    Time complexity: ~0.1ms per embedding (very fast).
+
+    Args:
+        index_name: Which index to assign (global, vehicles, people, faces)
+    """
+    try:
+        return await search_service.assign_unclustered(index_name=index_name)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        logger.error(f'Cluster assignment failed: {e}')
+        raise HTTPException(500, f'Assignment failed: {e!s}') from e
+
+
+@router.get('/clusters/stats/{index_name}', tags=['Track E: Clustering'])
+async def get_cluster_stats(
+    search_service: VisualSearchDep,
+    index_name: str,
+):
+    """
+    Get detailed cluster statistics for an index.
+
+    Returns:
+    - Per-cluster counts and distances
+    - Cluster balance metrics
+    - Training metadata (when trained, n_vectors)
+
+    Args:
+        index_name: Which index (global, vehicles, people, faces)
+    """
+    try:
+        return await search_service.get_cluster_stats(index_name=index_name)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        logger.error(f'Failed to get cluster stats: {e}')
+        raise HTTPException(500, f'Failed to get stats: {e!s}') from e
+
+
+@router.get('/clusters/balance/{index_name}', tags=['Track E: Clustering'])
+async def check_cluster_balance(
+    search_service: VisualSearchDep,
+    index_name: str,
+):
+    """
+    Check if clusters need rebalancing.
+
+    Returns recommendation based on:
+    - Imbalance ratio (max cluster / min cluster size)
+    - Empty cluster percentage
+    - New data since last training
+
+    Args:
+        index_name: Which index to check
+    """
+    try:
+        return await search_service.check_cluster_balance(index_name=index_name)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        logger.error(f'Failed to check balance: {e}')
+        raise HTTPException(500, f'Failed to check balance: {e!s}') from e
+
+
+@router.post('/clusters/rebalance/{index_name}', tags=['Track E: Clustering'])
+async def rebalance_clusters(
+    search_service: VisualSearchDep,
+    index_name: str,
+):
+    """
+    Force rebalance clusters by re-training from current data.
+
+    This extracts all embeddings from OpenSearch and re-trains the FAISS index.
+    Use when check_balance indicates rebalancing is needed.
+
+    Args:
+        index_name: Which index to rebalance
+    """
+    try:
+        return await search_service.rebalance_clusters(index_name=index_name)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        logger.error(f'Cluster rebalance failed: {e}')
+        raise HTTPException(500, f'Rebalance failed: {e!s}') from e
+
+
+@router.get('/clusters/{index_name}/{cluster_id}', tags=['Track E: Clustering'])
+async def get_cluster_members(
+    search_service: VisualSearchDep,
+    index_name: str,
+    cluster_id: int,
+    page: int = Query(0, ge=0, description='Page number'),
+    size: int = Query(50, ge=1, le=200, description='Page size'),
+):
+    """
+    Get members of a specific cluster (like a Google Photos album).
+
+    Returns documents sorted by distance to centroid (most representative first).
+
+    Args:
+        index_name: Which index (global, vehicles, people, faces)
+        cluster_id: The cluster ID to retrieve
+        page: Page number (0-indexed)
+        size: Page size (max 200)
+    """
+    try:
+        return await search_service.get_cluster_members(
+            index_name=index_name,
+            cluster_id=cluster_id,
+            page=page,
+            size=size,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        logger.error(f'Failed to get cluster members: {e}')
+        raise HTTPException(500, f'Failed to get members: {e!s}') from e
+
+
+@router.get('/albums', tags=['Track E: Clustering'])
+async def list_albums(
+    search_service: VisualSearchDep,
+    min_size: int = Query(5, ge=1, description='Minimum cluster size to include'),
+):
+    """
+    List auto-generated albums (clusters) from global index.
+
+    Like Google Photos "Things" or "Places" - automatically grouped similar images.
+
+    Args:
+        min_size: Only include clusters with at least this many images
+    """
+    try:
+        return await search_service.list_albums(min_size=min_size)
+    except Exception as e:
+        logger.error(f'Failed to list albums: {e}')
+        raise HTTPException(500, f'Failed to list albums: {e!s}') from e
+
+
+# =============================================================================
+# Cluster Maintenance Endpoints (Automatic Rebalancing)
+# =============================================================================
+
+
+@router.get('/maintenance/status', tags=['Track E: Maintenance'])
+async def get_maintenance_status(search_service: VisualSearchDep):
+    """
+    Check rebalancing status for all indexes.
+
+    Returns which indexes need rebalancing based on:
+    - Amount of new data since training
+    - Cluster size imbalance
+    - Empty cluster ratio
+
+    Use this to monitor cluster health and decide when to rebalance.
+    """
+    try:
+        from src.services.cluster_maintenance import ClusterMaintenanceService
+
+        service = ClusterMaintenanceService(search_service.opensearch)
+        return await service.check_all_indexes()
+    except Exception as e:
+        logger.error(f'Failed to get maintenance status: {e}')
+        raise HTTPException(500, f'Failed to get status: {e!s}') from e
+
+
+@router.post('/maintenance/run', tags=['Track E: Maintenance'])
+async def run_maintenance(
+    search_service: VisualSearchDep,
+    force: bool = Query(False, description='Force rebalance even if not needed'),
+    pattern: str = Query(
+        'medium_volume',
+        description='Ingestion pattern: low_volume, medium_volume, high_volume, very_high_volume',
+    ),
+):
+    """
+    Run maintenance check and rebalance indexes that need it.
+
+    This checks all indexes and automatically rebalances any that exceed
+    the configured thresholds. Use this as a scheduled task or cron job.
+
+    Ingestion patterns determine rebalance thresholds:
+    - low_volume: < 1K images/day, rebalance when 50% new data
+    - medium_volume: 1K-10K images/day, rebalance when 40% new data
+    - high_volume: 10K-100K images/day, rebalance when 30% new data
+    - very_high_volume: 100K+ images/day, rebalance when 20% new data
+
+    Args:
+        force: Force rebalance all indexes regardless of thresholds
+        pattern: Ingestion pattern for determining thresholds
+    """
+    try:
+        from src.services.cluster_maintenance import ClusterMaintenanceService, IngestionPattern
+
+        # Parse pattern
+        pattern_map = {
+            'low_volume': IngestionPattern.LOW_VOLUME,
+            'medium_volume': IngestionPattern.MEDIUM_VOLUME,
+            'high_volume': IngestionPattern.HIGH_VOLUME,
+            'very_high_volume': IngestionPattern.VERY_HIGH_VOLUME,
+        }
+
+        if pattern.lower() not in pattern_map:
+            raise HTTPException(400, f'Invalid pattern. Must be one of: {list(pattern_map.keys())}')
+
+        ingestion_pattern = pattern_map[pattern.lower()]
+        service = ClusterMaintenanceService(search_service.opensearch, pattern=ingestion_pattern)
+
+        return await service.check_and_rebalance_all(force=force)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Maintenance run failed: {e}')
+        raise HTTPException(500, f'Maintenance failed: {e!s}') from e
+
+
+@router.post('/maintenance/rebalance-after-bulk', tags=['Track E: Maintenance'])
+async def rebalance_after_bulk_ingestion(
+    search_service: VisualSearchDep,
+    indexes: str = Query(
+        'global',
+        description='Comma-separated indexes to rebalance: global,vehicles,people,faces',
+    ),
+):
+    """
+    Rebalance specific indexes after a bulk ingestion.
+
+    Call this after ingesting a large batch of images (e.g., 10K+ photos).
+    Only rebalances if thresholds are exceeded.
+
+    Args:
+        indexes: Which indexes to check and rebalance
+
+    Example workflow:
+    1. POST /track_e/ingest (many times for bulk upload)
+    2. POST /track_e/maintenance/rebalance-after-bulk?indexes=global,vehicles
+    """
+    try:
+        from src.clients.opensearch import IndexName
+        from src.services.cluster_maintenance import ClusterMaintenanceService
+        from src.services.clustering import ClusterIndex
+
+        # Parse indexes
+        index_list = [idx.strip().lower() for idx in indexes.split(',')]
+
+        name_map = {
+            'global': (ClusterIndex.GLOBAL, IndexName.GLOBAL),
+            'vehicles': (ClusterIndex.VEHICLES, IndexName.VEHICLES),
+            'people': (ClusterIndex.PEOPLE, IndexName.PEOPLE),
+            'faces': (ClusterIndex.FACES, IndexName.FACES),
+        }
+
+        invalid = [idx for idx in index_list if idx not in name_map]
+        if invalid:
+            raise HTTPException(
+                400, f'Invalid indexes: {invalid}. Must be: {list(name_map.keys())}'
+            )
+
+        service = ClusterMaintenanceService(search_service.opensearch)
+        results = {}
+
+        for idx in index_list:
+            cluster_idx, os_idx = name_map[idx]
+            result = await service.check_and_rebalance(cluster_idx, os_idx)
+            results[idx] = result
+
+        rebalanced = sum(1 for r in results.values() if r.get('action') == 'rebalanced')
+
+        return {
+            'status': 'complete',
+            'indexes_checked': len(index_list),
+            'indexes_rebalanced': rebalanced,
+            'results': results,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Post-bulk rebalance failed: {e}')
+        raise HTTPException(500, f'Rebalance failed: {e!s}') from e
 
 
 # =============================================================================

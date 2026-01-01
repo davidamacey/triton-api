@@ -55,6 +55,12 @@ load_test_results/
 locust_*.html
 locust_*.csv
 
+# Clustering test output (mosaics, visualizations)
+cluster_test_output/
+
+# FAISS index files (generated during training)
+faiss_indexes/
+
 # ============================================================================
 # Test Data and Samples
 # ============================================================================
