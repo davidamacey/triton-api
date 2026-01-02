@@ -6,9 +6,16 @@ Standalone script that ingests images via HTTP API calls.
 No container dependencies - runs from host machine.
 
 Usage:
+    # Normal ingestion (skips duplicates)
     python scripts/client_ingest.py \
         --images-dir /mnt/nvm/KILLBOY_SAMPLE_PICTURES \
         --max-images 500
+
+    # Benchmark mode (processes same images repeatedly for speed testing)
+    python scripts/client_ingest.py \
+        --images-dir /mnt/nvm/KILLBOY_SAMPLE_PICTURES \
+        --max-images 100 \
+        --benchmark
 
     python scripts/client_ingest.py \
         --images-dir /mnt/nvm/repos/triton-api/test_images/faces/lfw-deepfunneled \
@@ -49,11 +56,12 @@ def find_images(directory: Path, max_images: int = 1000) -> list[Path]:
     return sorted(images)
 
 
-def process_image(image_path: Path) -> dict:
+def process_image(image_path: Path, skip_duplicates: bool = True) -> dict:
     """Process single image through all pipelines."""
     result = {
         'path': str(image_path),
         'success': False,
+        'duplicate': False,
         'yolo_detections': 0,
         'faces': 0,
         'global_ingested': False,
@@ -69,14 +77,21 @@ def process_image(image_path: Path) -> dict:
         ingest_resp = requests.post(
             f'{API_BASE}/track_e/ingest',
             files={'file': (image_path.name, image_bytes, 'image/jpeg')},
-            params={'image_path': str(image_path)},
+            params={
+                'image_path': str(image_path),
+                'skip_duplicates': str(skip_duplicates).lower(),
+            },
             timeout=60,
         )
 
         if ingest_resp.status_code == 200:
             ingest_data = ingest_resp.json()
-            result['yolo_detections'] = ingest_data.get('num_detections', 0)
-            result['global_ingested'] = True
+            if ingest_data.get('status') == 'duplicate':
+                result['duplicate'] = True
+                result['success'] = True  # Still counts as "processed"
+            else:
+                result['yolo_detections'] = ingest_data.get('num_detections', 0)
+                result['global_ingested'] = True
         else:
             result['error'] = f'Ingest failed: {ingest_resp.status_code}'
 
@@ -103,11 +118,13 @@ def process_image(image_path: Path) -> dict:
     return result
 
 
-def main(args):
+def main(args, skip_duplicates: bool = True):
     print('=' * 60)
     print('Multi-Index Image Ingestion (Unified Pipeline)')
     print('=' * 60)
     print('Face detection: Person-crop only (optimized)')
+    if not skip_duplicates:
+        print('⚠️  Benchmark mode: duplicate detection DISABLED')
     print('=' * 60)
 
     # Check API health
@@ -152,18 +169,21 @@ def main(args):
         'total': len(images),
         'success': 0,
         'failed': 0,
+        'duplicates': 0,
         'total_detections': 0,
         'total_faces': 0,
         'faces_indexed': 0,
     }
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = {executor.submit(process_image, img): img for img in images}
+        futures = {executor.submit(process_image, img, skip_duplicates): img for img in images}
 
         for i, future in enumerate(as_completed(futures)):
             result = future.result()
 
-            if result['success']:
+            if result['duplicate']:
+                results['duplicates'] += 1
+            elif result['success']:
                 results['success'] += 1
                 results['total_detections'] += result['yolo_detections']
                 results['total_faces'] += result['faces']
@@ -190,7 +210,8 @@ def main(args):
     print('INGESTION COMPLETE')
     print('=' * 60)
     print(f'Images processed: {results["total"]}')
-    print(f'  Successful: {results["success"]}')
+    print(f'  New images indexed: {results["success"]}')
+    print(f'  Duplicates skipped: {results["duplicates"]}')
     print(f'  Failed: {results["failed"]}')
     print(f'Total YOLO detections: {results["total_detections"]}')
     print(f'Total faces detected: {results["total_faces"]}')
@@ -211,7 +232,7 @@ def main(args):
     return 0
 
 
-if __name__ == '__main__':
+def run():
     parser = argparse.ArgumentParser(description='Client-side image ingestion')
     parser.add_argument('--images-dir', type=str, required=True, help='Directory containing images')
     parser.add_argument('--max-images', type=int, default=500, help='Maximum images to process')
@@ -219,6 +240,19 @@ if __name__ == '__main__':
     parser.add_argument(
         '--recreate-indexes', action='store_true', help='Recreate indexes before ingestion'
     )
+    parser.add_argument(
+        '--benchmark',
+        action='store_true',
+        help='Benchmark mode: disable duplicate detection to allow repeated processing of same images',
+    )
 
     args = parser.parse_args()
-    sys.exit(main(args))
+
+    # In benchmark mode, skip_duplicates=False allows processing same images repeatedly
+    skip_duplicates = not args.benchmark
+
+    return main(args, skip_duplicates=skip_duplicates)
+
+
+if __name__ == '__main__':
+    sys.exit(run())

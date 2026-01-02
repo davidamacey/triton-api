@@ -1,15 +1,15 @@
 # Track E Extension: OCR, Face Recognition & Duplicate Detection
 
 > **Living Documentation** - Update this file as features are implemented.
-> Last Updated: 2026-01-01
+> Last Updated: 2026-01-02
 
 ---
 
 ## Executive Summary
 
-**Key Discovery**: Face recognition infrastructure is **already 90% complete**! SCRFD face detection and ArcFace embedding models are deployed. Only API exposure and person management logic needed.
+**Status Update**: Face recognition is **95% complete** and **Duplicate Detection is 100% complete**. Only Person Management (clustering with names) and OCR remain as features to implement.
 
-Your triton-api has **significant performance advantages** over immich (3-5x faster) due to DALI GPU preprocessing and TensorRT. This plan adds immich's missing features while maintaining that advantage.
+Your triton-api has **significant performance advantages** over Immich (3-5x faster) due to DALI GPU preprocessing and TensorRT. This plan adds Immich's missing features while maintaining that advantage.
 
 **User Requirements:**
 - Implement ALL THREE features (OCR, Face Recognition, Duplicates)
@@ -18,7 +18,7 @@ Your triton-api has **significant performance advantages** over immich (3-5x fas
 - Extend Track E (unified API)
 - Use **imohash** for fast image hashing (not SHA256)
 
-**Estimated Total Time: 7-10 days**
+**Estimated Remaining Time: 4-5 days** (Duplicate Detection complete, OCR + Person Management remain)
 
 ---
 
@@ -28,14 +28,18 @@ Your triton-api has **significant performance advantages** over immich (3-5x fas
 |---------|--------|-------|
 | **Face Detection (SCRFD)** | ✅ Deployed | `models/scrfd_10g_face_detect/` |
 | **Face Embeddings (ArcFace)** | ✅ Deployed | `models/arcface_w600k_r50/` |
-| **Face Pipeline BLS** | ✅ Deployed | `models/face_pipeline/` |
-| **Face API Endpoints** | ⬜ Not Started | Need to expose in track_e.py |
-| **Person Management** | ⬜ Not Started | Clustering + naming service |
+| **Face Pipeline BLS** | ✅ Deployed | `models/face_pipeline/` (6 instances, dynamic batching) |
+| **Quad DALI Preprocessing** | ✅ Deployed | `models/quad_preprocess_dali/` - 4 branches |
+| **Unified Ensemble** | ✅ Deployed | `models/yolo_face_clip_ensemble/` |
+| **Face API Endpoints** | ✅ Complete | `/faces/detect`, `/faces/recognize`, `/faces/full`, `/faces/verify`, `/faces/ingest` |
+| **Face Ingestion** | ✅ Complete | Ingests to `visual_search_faces` index |
+| **FAISS IVF Clustering** | ✅ Complete | Multi-index clustering for faces, people, vehicles |
+| **Person Management** | 🟡 Partial | Need: naming, merge, split, person index |
 | **OCR Detection Model** | ⬜ Not Started | PP-OCRv5 TensorRT export |
 | **OCR Recognition Model** | ⬜ Not Started | PP-OCRv5 TensorRT export |
 | **OCR API Endpoints** | ⬜ Not Started | Search by text in image |
-| **Duplicate Detection** | ⬜ Not Started | imohash + CLIP similarity |
-| **Unified Ingestion** | ⬜ Not Started | All features in one pass |
+| **Duplicate Detection** | ✅ Complete | imohash + CLIP similarity grouping |
+| **Job Queue (Optional)** | ⬜ Not Started | Async processing like Immich |
 
 ---
 
@@ -46,61 +50,223 @@ Your triton-api has **significant performance advantages** over immich (3-5x fas
 | Model Serving | NVIDIA Triton + TensorRT | ONNX Runtime | Triton (2-3x faster) |
 | Preprocessing | DALI (100% GPU) | OpenCV/PIL (CPU) | Triton (4-5x faster) |
 | Batching | Dynamic batching (max 128) | Manual batching | Triton |
-| Vector DB | OpenSearch | PostgreSQL + pgvector | Comparable |
-| Face Models | SCRFD + ArcFace (TRT) | RetinaFace + ArcFace (ONNX) | Triton |
-| OCR | **MISSING** | PaddleOCR v5 | Immich |
-| Person Management | **MISSING** | Full clustering + naming | Immich |
+| Vector DB | OpenSearch + FAISS IVF | PostgreSQL + pgvector | Comparable (different trade-offs) |
+| Face Detection | SCRFD 10G (TRT) | RetinaFace (ONNX) | Triton (faster) |
+| Face Embedding | ArcFace R50 (TRT) | ArcFace (ONNX) | Triton (faster) |
+| Face Pipeline | Unified BLS (single call) | Separate calls | Triton (less overhead) |
+| CLIP Embedding | MobileCLIP S2 (TRT) | Various (ONNX) | Triton (faster) |
+| OCR | **MISSING** | PaddleOCR v5 (RapidOCR) | Immich |
+| Person Management | 🟡 Partial (clustering works) | Full (naming, merge, split) | Immich |
+| Hashing | imohash (48KB sampled, ~1ms) | SHA-1 (full file read) | **Triton** (faster) |
+| Job Queue | **MISSING** (sync only) | BullMQ/Redis | Immich (reliability) |
+| Duplicate Detection | imohash + CLIP (threshold=0.99) | CLIP similarity (maxDistance=0.01) | **Tie** (same threshold) |
 
 ---
 
-## Phase 1: Face Recognition API (Infrastructure Exists!)
+## Immich Processing Pipeline Analysis
 
-**Status: 90% Complete - Only API Layer Needed**
-**Time Estimate: 2 days**
+### Job Flow (From Immich Source Code)
 
-### Existing Infrastructure (Already Deployed)
+```mermaid
+graph TD
+    A[Asset Upload] --> B[Sidecar Check]
+    B --> C[Metadata Extraction]
+    C --> D[Storage Template Migration]
+    D --> E[Thumbnail Generation]
+    E --> F[Smart Search - CLIP]
+    E --> G[Face Detection]
+    E --> H[OCR]
+    E --> I[Video Encoding]
+    F --> J[Duplicate Detection]
+    G --> K[Facial Recognition - Clustering]
 ```
-models/
-├── scrfd_10g_face_detect/      # SCRFD TensorRT (face detection)
-├── arcface_w600k_r50/          # ArcFace TensorRT (512-dim embeddings)
-├── face_pipeline/              # Python BLS orchestrator
-├── quad_preprocess_dali/       # 4-branch DALI (YOLO, CLIP, SCRFD, HD)
-└── yolo_face_clip_ensemble/    # Unified ensemble
+
+**Key Insights from `job.service.ts`:**
+
+1. **Parallel ML Jobs**: After thumbnails, Immich runs SmartSearch + FaceDetection + OCR **in parallel**
+2. **Sequential Dependencies**: Duplicate detection waits for CLIP embeddings
+3. **Deferred Face Recognition**: Non-core faces (few matches) are deferred for later processing
+4. **Nightly Clustering**: Face clustering runs nightly, skips if no new faces since last run
+
+### Immich Hashing Strategy (From `crypto.repository.ts`)
+
+```typescript
+// Immich uses SHA-1 for file checksums (not imohash)
+hashSha1(value: string | Buffer): Buffer {
+  return createHash('sha1').update(value).digest();
+}
+
+// Checksum computed on full file upload
+// Used for exact duplicate detection during upload
 ```
+
+**Implications for Triton-API:**
+- SHA-1 is slow for large files (reads entire file)
+- imohash is better for our use case (constant time, 48KB sampled)
+- However, Immich uses CLIP similarity for near-duplicates (same as our plan)
+
+### Immich Duplicate Detection (From `duplicate.service.ts`)
+
+```typescript
+// Search for similar embeddings within threshold
+const duplicateAssets = await this.duplicateRepository.search({
+  assetId: asset.id,
+  embedding: asset.embedding,
+  maxDistance: machineLearning.duplicateDetection.maxDistance, // Configurable
+  type: asset.type,
+  userIds: [asset.ownerId],
+});
+```
+
+**Key Design Decisions:**
+- Uses CLIP embeddings (not perceptual hash like pHash/dHash)
+- Groups duplicates with `duplicateId` field
+- Configurable distance threshold via admin settings
+
+### Immich Face Recognition (From `person.service.ts`)
+
+```typescript
+// Core vs Non-Core faces
+const isCore = matches.length >= machineLearning.facialRecognition.minFaces &&
+               face.asset.visibility === AssetVisibility.Timeline;
+
+// Deferred processing for non-core faces
+if (!isCore && !deferred) {
+  await this.jobRepository.queue({
+    name: JobName.FacialRecognition,
+    data: { id, deferred: true }
+  });
+  return JobStatus.Skipped;
+}
+```
+
+**Key Features:**
+- **minFaces threshold**: Requires N matches before creating person (avoids noise)
+- **Deferred processing**: Non-core faces processed after queue clears
+- **Person merging**: Manual merge with name/birthdate inheritance
+- **Representative face**: Each person has a thumbnail face
+
+### Immich OCR (From `ocr.service.ts`)
+
+```typescript
+// Uses preview image, not original (faster)
+const ocrResults = await this.machineLearningRepository.ocr(
+  asset.previewFile,
+  machineLearning.ocr
+);
+
+// Stores bounding boxes + text
+const ocrDataList = [];
+for (let i = 0; i < text.length; i++) {
+  ocrDataList.push({
+    assetId: id,
+    x1: box[boxOffset], y1: box[boxOffset + 1], ...
+    text: rawText,
+  });
+}
+
+// Tokenizes for search
+searchTokens.push(...tokenizeForSearch(rawText));
+```
+
+**Key Features:**
+- Uses preview (smaller) for speed
+- Stores quad bounding boxes (8 coordinates per box)
+- Trigram tokenization for fuzzy search
+
+---
+
+## What We Already Have (Implemented)
+
+### Deployed Models (From `models/` Directory)
+
+| Model | Purpose | Performance |
+|-------|---------|-------------|
+| `scrfd_10g_face_detect` | Face detection | TensorRT, ~5ms |
+| `arcface_w600k_r50` | Face embeddings (512-dim) | TensorRT, ~3ms |
+| `face_pipeline` | Unified face processing | Python BLS, 6 instances |
+| `quad_preprocess_dali` | 4-branch preprocessing | GPU, ~1ms |
+| `yolo_face_clip_ensemble` | Combined inference | All models in one call |
+| `unified_embedding_extractor` | Scene + face embeddings | Flexible output |
+| `scrfd_postprocess` | Face NMS + alignment | Python backend |
+
+### Deployed API Endpoints (From `track_e.py`)
+
+| Endpoint | Status | Description |
+|----------|--------|-------------|
+| `/track_e/faces/detect` | ✅ | Face detection only |
+| `/track_e/faces/recognize` | ✅ | Detection + embeddings |
+| `/track_e/faces/full` | ✅ | Full pipeline with quality |
+| `/track_e/faces/verify` | ✅ | Compare two face images |
+| `/track_e/faces/ingest` | ✅ | Ingest faces to OpenSearch |
+| `/track_e/unified` | ✅ | YOLO + CLIP + Faces in one call |
+| `/track_e/clusters/*` | ✅ | FAISS IVF clustering endpoints |
+| `/track_e/albums` | ✅ | List cluster albums |
+| `/track_e/maintenance/*` | ✅ | Cluster rebalancing |
+
+### Deployed OpenSearch Indexes
+
+| Index | Status | Fields |
+|-------|--------|--------|
+| `visual_search_global` | ✅ | Scene CLIP embeddings |
+| `visual_search_faces` | ✅ | Face ArcFace embeddings |
+| `visual_search_people` | ✅ | Person boxes (YOLO class 0) |
+| `visual_search_vehicles` | ✅ | Vehicle boxes |
+
+---
+
+## Phase 1: Person Management (Face Infra Complete!)
+
+**Status: 95% Complete - Only Person Naming/Management Needed**
+**Time Estimate: 1 day**
+
+### What's Already Working
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Face Detection | ✅ | SCRFD 10G TensorRT |
+| Face Embeddings | ✅ | ArcFace R50 TensorRT |
+| Face Pipeline | ✅ | Python BLS with Umeyama alignment |
+| Face API Endpoints | ✅ | `/faces/detect`, `/recognize`, `/full`, `/verify` |
+| Face Ingestion | ✅ | Stores to `visual_search_faces` |
+| FAISS IVF Clustering | ✅ | Auto-clusters by similarity |
+
+### What's Missing: Person Management
+
+The key difference from Immich is **named person entities**. Currently we have:
+- ✅ Face embeddings stored per-image
+- ✅ Similarity search across all faces
+- ❌ Named "Person" entities (like "John Smith")
+- ❌ Merge/split operations for incorrect groupings
+- ❌ Representative face thumbnails
 
 ### Files to Create/Modify
 
 | File | Action | Description |
 |------|--------|-------------|
-| `src/routers/track_e.py` | Modify | Add face search + person management endpoints |
-| `src/schemas/track_e.py` | Modify | Add Pydantic models for face responses |
-| `src/services/visual_search.py` | Modify | Add face ingestion and search methods |
-| `src/services/person_management.py` | **Create** | Person clustering and naming logic |
+| `src/services/person_management.py` | **Create** | Person CRUD + naming logic |
+| `src/routers/track_e.py` | Modify | Add person management endpoints |
 | `src/clients/opensearch.py` | Modify | Add `visual_search_persons` index |
 
-### New API Endpoints
+### New Person Management API Endpoints
 
 ```python
-# Face Detection + Embedding
-POST /track_e/faces/predict           # Detect faces + extract embeddings
-POST /track_e/faces/predict_batch     # Batch face processing
-
-# Face Search
-POST /track_e/search/face             # Find same person across images
-POST /track_e/search/face/by_id       # Search using stored face embedding
-
-# Person Management (Google Photos-like)
+# Person CRUD (like Immich person.service.ts)
 GET  /track_e/persons                 # List all persons (with face count)
-GET  /track_e/persons/{person_id}     # Get person details + face samples
-POST /track_e/persons/{person_id}/name    # Set person name
-POST /track_e/persons/merge           # Merge two persons
-POST /track_e/persons/split           # Split incorrectly grouped faces
-DELETE /track_e/persons/{person_id}   # Delete person (keeps faces unnamed)
+GET  /track_e/persons/{person_id}     # Get person details + sample faces
+POST /track_e/persons                 # Create person manually
+PUT  /track_e/persons/{person_id}     # Update name/birthDate/isHidden
+DELETE /track_e/persons/{person_id}   # Delete person (unlinks faces)
 
-# Auto-clustering
-POST /track_e/faces/cluster           # Run face clustering to create persons
-GET  /track_e/faces/unassigned        # Get faces without person assignment
+# Person Operations
+POST /track_e/persons/merge           # Merge persons (like Immich mergePerson)
+POST /track_e/persons/{id}/split      # Split incorrectly grouped faces
+POST /track_e/persons/{id}/thumbnail  # Set representative face
+
+# Face-to-Person Assignment
 POST /track_e/faces/{face_id}/assign  # Manually assign face to person
+POST /track_e/faces/auto-cluster      # Run clustering to create persons
+GET  /track_e/faces/unassigned        # Get faces without person
 ```
 
 ### OpenSearch: New Person Index
@@ -225,34 +391,83 @@ GET  /track_e/ocr/{image_id}       # Get OCR results for an image
 
 ---
 
-## Phase 3: Duplicate Detection
+## Phase 3: Duplicate Detection ✅ COMPLETE
 
-**Status: Easy - Use Existing Infrastructure**
-**Time Estimate: 1-2 days**
+**Status: Fully Implemented**
 
 ### Implementation Strategy
 
-**Exact Duplicates:** imohash (fast constant-time hash)
-**Near Duplicates:** CLIP embedding similarity > 0.98 (already have embeddings!)
+**Exact Duplicates:** imohash (fast constant-time hash) ✅ **COMPLETE**
+**Near Duplicates:** CLIP embedding similarity (configurable threshold) ✅ **COMPLETE**
 
-### Schema Extension
+### Schema Extension ✅ COMPLETE
 
-Add to `visual_search_global`:
+Added to `visual_search_global`:
 ```json
 {
   "imohash": { "type": "keyword" },
-  "file_size_bytes": { "type": "long" }
+  "file_size_bytes": { "type": "long" },
+  "duplicate_group_id": { "type": "keyword" },
+  "is_duplicate_primary": { "type": "boolean" },
+  "duplicate_score": { "type": "float" }
 }
 ```
 
-### New Duplicate API Endpoints
+### Implemented Features ✅
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| imohash on ingest | ✅ | Computed and stored for every image |
+| `skip_duplicates` parameter | ✅ | `/track_e/ingest?skip_duplicates=true` (default) |
+| Duplicate check on ingest | ✅ | Returns existing image info if hash matches |
+| Benchmark mode | ✅ | `client_ingest.py --benchmark` disables check |
+| Near-duplicate search | ✅ | CLIP similarity k-NN search |
+| Duplicate grouping | ✅ | Auto-group similar images |
+| Group management | ✅ | Merge, split, remove from groups |
+
+### Duplicate API Endpoints ✅ COMPLETE
 
 ```python
-POST /track_e/duplicates/check     # Check if image exists (imohash)
-POST /track_e/duplicates/find      # Find near-duplicates (CLIP similarity)
-GET  /track_e/duplicates/groups    # List all duplicate groups
-POST /track_e/duplicates/merge     # Mark duplicates (keep one, hide others)
+# Find duplicates
+POST /track_e/duplicates/find           # Find near-duplicates for an image ID
+POST /track_e/duplicates/find_by_image  # Find duplicates by uploading image
+POST /track_e/duplicates/scan           # Scan index and create groups
+
+# Manage groups
+GET  /track_e/duplicates/groups                           # List all groups
+GET  /track_e/duplicates/group/{group_id}                 # Get group members
+DELETE /track_e/duplicates/group/{group_id}/member/{id}   # Remove from group
+POST /track_e/duplicates/groups/merge                     # Merge groups
+
+# Statistics
+GET  /track_e/duplicates/stats          # Get duplicate statistics
 ```
+
+### Threshold Guide (Immich Comparison)
+
+**Default threshold: 0.99** (matches Immich's `maxDistance=0.01`)
+
+Immich uses cosine **distance** (lower = more similar), we use cosine **similarity** (higher = more similar):
+- `distance = 1 - similarity`
+- Immich `maxDistance=0.01` → our `threshold=0.99`
+
+| Threshold | Description | Use Case |
+|-----------|-------------|----------|
+| **0.99** | Nearly identical (Immich default) | Crops, resizes, compression |
+| 0.95-0.98 | Very similar | Same scene, slight variations |
+| 0.90-0.95 | Similar content | Same subject, different angle |
+| <0.90 | Related | Different images, similar theme |
+
+### Auto-Assignment During Ingestion
+
+Near-duplicates are automatically detected and grouped during `/track_e/ingest`:
+```python
+POST /track_e/ingest
+    ?detect_near_duplicates=true  # Default: True
+    &near_duplicate_threshold=0.99  # Default: 0.99 (Immich-compatible)
+```
+
+**No periodic retraining required** - unlike FAISS IVF, k-NN duplicate detection is real-time.
 
 ---
 
@@ -292,39 +507,143 @@ async def ingest_image_full(
 
 ---
 
-## Implementation Schedule
+## Updated Implementation Schedule
 
-| Phase | Task | Time | Dependencies |
-|-------|------|------|--------------|
-| **1.1** | Face search endpoints | 4h | None |
-| **1.2** | Person management service | 6h | 1.1 |
-| **1.3** | Person clustering algorithm | 4h | 1.2 |
-| **1.4** | Face integration tests | 2h | 1.3 |
-| **2.1** | Download/export PaddleOCR | 4h | None |
-| **2.2** | OCR Python BLS backend | 6h | 2.1 |
-| **2.3** | OCR DALI preprocessing | 4h | 2.1 |
-| **2.4** | OCR OpenSearch index + search | 4h | 2.2 |
-| **2.5** | OCR API endpoints | 3h | 2.4 |
-| **3.1** | Duplicate detection service | 4h | None |
-| **3.2** | Duplicate API endpoints | 2h | 3.1 |
-| **4.1** | Unified ingestion | 4h | 1-3 |
-| **4.2** | Batch ingestion optimization | 4h | 4.1 |
+| Phase | Task | Time | Status | Dependencies |
+|-------|------|------|--------|--------------|
+| **1.1** | Face detection/embedding endpoints | - | ✅ Complete | - |
+| **1.2** | Face ingestion + clustering | - | ✅ Complete | - |
+| **1.3** | Person management service | 4h | ⬜ TODO | None |
+| **1.4** | Person API endpoints | 2h | ⬜ TODO | 1.3 |
+| **1.5** | Person OpenSearch index | 2h | ⬜ TODO | 1.3 |
+| **2.1** | Download/export PaddleOCR | 4h | ⬜ TODO | None |
+| **2.2** | OCR TensorRT conversion | 4h | ⬜ TODO | 2.1 |
+| **2.3** | OCR Python BLS backend | 6h | ⬜ TODO | 2.2 |
+| **2.4** | OCR DALI preprocessing | 4h | ⬜ TODO | 2.1 |
+| **2.5** | OCR OpenSearch index | 2h | ⬜ TODO | 2.3 |
+| **2.6** | OCR API endpoints | 3h | ⬜ TODO | 2.5 |
+| **3.1** | imohash integration | 2h | ✅ Done | None |
+| **3.2** | Near-duplicate detection (CLIP) | 4h | ✅ Done | 3.1 |
+| **3.3** | Duplicate grouping/merge API | 2h | ✅ Done | 3.2 |
+| **4.1** | Unified ingestion pipeline | 4h | ⬜ TODO | 1-3 |
+| **4.2** | Batch ingestion optimization | 4h | ⬜ TODO | 4.1 |
 
-**Total: ~50 hours (7-10 days)**
+**Remaining: ~31 hours (4-5 days)**
+
+### Parallel Work Streams
+
+```
+Stream A (Person Management):  1.3 → 1.4 → 1.5  (~8h)
+Stream B (OCR):                2.1 → 2.2 → 2.3 → 2.4 → 2.5 → 2.6  (~23h)
+Stream C (Duplicates):         ✅ COMPLETE (imohash + CLIP near-duplicates)
+Stream D (Integration):        4.1 → 4.2  (~8h, depends on A-B)
+```
+
+**With parallel execution: 3-4 days**
 
 ---
 
 ## Critical Files Summary
 
-| File | Purpose |
-|------|---------|
-| `src/routers/track_e.py` | Add all new endpoints (faces, OCR, duplicates, persons) |
-| `src/services/person_management.py` | **NEW** - Person clustering and management |
-| `src/services/ocr_service.py` | **NEW** - OCR inference wrapper |
-| `src/clients/opensearch.py` | Add new index schemas |
-| `src/services/visual_search.py` | Extend with face/OCR/duplicate methods |
-| `models/ocr_pipeline/1/model.py` | **NEW** - OCR Python BLS |
-| `export/export_paddleocr.py` | **NEW** - PaddleOCR TRT export |
+| File | Purpose | Status |
+|------|---------|--------|
+| `src/routers/track_e.py` | All Track E endpoints | ✅ Exists (extend) |
+| `src/services/visual_search.py` | Visual search + clustering | ✅ Exists (extend) |
+| `src/clients/opensearch.py` | OpenSearch client | ✅ Exists (extend) |
+| `src/services/person_management.py` | **NEW** - Person CRUD + naming | ⬜ Create |
+| `src/services/ocr_service.py` | **NEW** - OCR inference wrapper | ⬜ Create |
+| `src/services/duplicate_detection.py` | Duplicate detection service | ✅ Complete |
+| `models/ocr_pipeline/1/model.py` | **NEW** - OCR Python BLS | ⬜ Create |
+| `export/export_paddleocr.py` | **NEW** - PaddleOCR TRT export | ⬜ Create |
+
+---
+
+## Best Practices from Immich to Adopt
+
+### 1. Job Queue for Reliability (Optional Enhancement)
+
+Immich uses BullMQ/Redis for job queuing. While our sync approach works, a job queue provides:
+
+| Benefit | How Immich Does It | Our Equivalent |
+|---------|-------------------|----------------|
+| **Retry on failure** | BullMQ auto-retry | Manual retry in API |
+| **Rate limiting** | Queue concurrency | Triton dynamic batching |
+| **Progress tracking** | Job status events | Streaming response |
+| **Deferred processing** | `deferred: true` flag | Batch endpoints |
+
+**Recommendation**: Consider adding a lightweight job queue (e.g., `arq` with Redis) for:
+- Large batch ingestion (1000+ images)
+- Background cluster rebalancing
+- Nightly maintenance tasks
+
+### 2. Deferred Face Recognition (Adopt)
+
+Immich's clever optimization for noisy faces:
+
+```python
+# Only cluster "core" faces (multiple matches) immediately
+# Defer single/few-match faces for later processing
+if matches < MIN_FACES_FOR_PERSON and not deferred:
+    queue.add(face_id, deferred=True)
+    return "skipped"
+```
+
+**Benefit**: Reduces noise in person clusters, faster initial ingestion.
+
+### 3. Preview Image for OCR (Adopt)
+
+Immich runs OCR on preview (smaller) images, not originals:
+- Faster processing
+- Good enough for text detection
+- Original only needed for high-res crop if required
+
+### 4. Trigram Search for OCR (Adopt)
+
+Immich tokenizes OCR text with trigrams for fuzzy matching:
+
+```python
+def tokenize_for_search(text: str) -> list[str]:
+    # Enables partial word matching
+    return [text[i:i+3] for i in range(len(text)-2)]
+```
+
+**OpenSearch Configuration**:
+```json
+"analyzer": {
+  "trigram_analyzer": {
+    "tokenizer": "standard",
+    "filter": ["lowercase", {"type": "ngram", "min_gram": 3, "max_gram": 3}]
+  }
+}
+```
+
+### 5. Checksum on Upload (Adopt - Modified)
+
+Immich computes SHA-1 on upload for exact duplicate detection. Our modification:
+
+```python
+# Use imohash (constant time) instead of SHA-1 (linear time)
+# 48KB sampled vs full file read
+import imohash
+
+hash = imohash.hashbytes(image_bytes).hex()
+existing = await opensearch.term_search({"imohash": hash})
+if existing:
+    return {"status": "duplicate", "existing_id": existing[0]["image_id"]}
+```
+
+### 6. Nightly Cluster Maintenance (Consider)
+
+Immich runs face clustering nightly with smart skip:
+
+```typescript
+// Skip if no new faces since last run
+if (state?.lastRun && latestFaceDate && state.lastRun > latestFaceDate) {
+  return JobStatus.Skipped;
+}
+```
+
+**Our Equivalent**: Already have `/maintenance/run` but could add scheduling.
 
 ---
 

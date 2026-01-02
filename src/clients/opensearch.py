@@ -298,6 +298,13 @@ class OpenSearchClient:
                     'metadata': {'type': 'object', 'enabled': True},
                     'indexed_at': {'type': 'date'},
                     'clustered_at': {'type': 'date'},
+                    # Duplicate detection fields
+                    'imohash': {'type': 'keyword'},  # Fast constant-time hash (48KB sampled)
+                    'file_size_bytes': {'type': 'long'},  # For additional verification
+                    # Near-duplicate grouping (CLIP similarity)
+                    'duplicate_group_id': {'type': 'keyword'},  # Group ID for near-duplicates
+                    'is_duplicate_primary': {'type': 'boolean'},  # True = best quality in group
+                    'duplicate_score': {'type': 'float'},  # Similarity to group primary
                 }
             },
         }
@@ -557,6 +564,8 @@ class OpenSearchClient:
         image_height: int | None = None,
         metadata: dict[str, Any] | None = None,
         clustering_service: ClusteringService | None = None,
+        imohash: str | None = None,
+        file_size_bytes: int | None = None,
     ) -> dict[str, Any]:
         """
         Ingest image with auto-routing to category-specific indexes.
@@ -582,6 +591,8 @@ class OpenSearchClient:
             image_height: Image height in pixels
             metadata: Optional dictionary for custom fields
             clustering_service: Optional ClusteringService for cluster assignment
+            imohash: Optional imohash for duplicate detection
+            file_size_bytes: Optional file size for additional duplicate verification
 
         Returns:
             Dict with ingestion results per index
@@ -626,6 +637,10 @@ class OpenSearchClient:
                 global_doc['height'] = image_height
             if metadata:
                 global_doc['metadata'] = metadata
+            if imohash:
+                global_doc['imohash'] = imohash
+            if file_size_bytes:
+                global_doc['file_size_bytes'] = file_size_bytes
 
             await self.client.index(
                 index=IndexName.GLOBAL.value,
@@ -743,6 +758,39 @@ class OpenSearchClient:
             f'skipped={results["skipped"]}, clustered={results["clustered"]}'
         )
         return results
+
+    async def check_duplicate_by_hash(self, imohash: str) -> dict[str, Any] | None:
+        """
+        Check if an image with the same imohash already exists.
+
+        This is a fast duplicate check using constant-time hashing.
+        The imohash samples only 48KB of the file (16KB x 3 locations),
+        making it O(1) regardless of file size.
+
+        Args:
+            imohash: Hex string from imohash.hashbytes()
+
+        Returns:
+            Existing document if found, None if no duplicate
+        """
+        try:
+            response = await self.client.search(
+                index=IndexName.GLOBAL.value,
+                body={
+                    'size': 1,
+                    'query': {'term': {'imohash': imohash}},
+                    '_source': ['image_id', 'image_path', 'indexed_at', 'imohash'],
+                },
+            )
+
+            hits = response['hits']['hits']
+            if hits:
+                return hits[0]['_source']
+            return None
+
+        except Exception as e:
+            logger.warning(f'Duplicate check failed: {e}')
+            return None
 
     async def ingest_faces(
         self,

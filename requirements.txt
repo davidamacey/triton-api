@@ -61,3 +61,6 @@ ftfy  # Text cleaning for CLIP tokenizer (required by open_clip)
 
 # Track E: FAISS Clustering (GPU-accelerated vector clustering)
 faiss-gpu-cu12>=1.10.0  # FAISS GPU for billion-scale clustering (CUDA 12)
+
+# Track E: Duplicate Detection
+imohash  # Fast constant-time image hashing (48KB sampled, ~1ms for any file size)

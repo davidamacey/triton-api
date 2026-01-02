@@ -331,25 +331,52 @@ async def ingest_image(
     ),
     image_path: str | None = Query(None, description='File path for retrieval'),
     metadata: str | None = Query(None, description='JSON string for metadata'),
+    skip_duplicates: bool = Query(
+        True,
+        description='Skip processing if image hash already exists. '
+        'Set to False for benchmarks. Default: True (production).',
+    ),
+    detect_near_duplicates: bool = Query(
+        True,
+        description='Check for visually similar images and auto-assign to '
+        'duplicate groups. Default: True.',
+    ),
+    near_duplicate_threshold: float = Query(
+        0.99,
+        ge=0.5,
+        le=1.0,
+        description='Similarity threshold for near-duplicate grouping. '
+        '0.99 = near-identical (default, matches Immich), '
+        '0.95 = very similar, 0.90 = similar content.',
+    ),
 ):
     """
     Ingest image into visual search indexes with auto-routing.
 
     Pipeline:
-    1. Run Track E ensemble (YOLO + MobileCLIP) for embeddings
-    2. Route to appropriate indexes:
+    1. Compute imohash for fast duplicate detection (if skip_duplicates=True)
+    2. Check if image already exists by hash
+    3. Run Track E ensemble (YOLO + MobileCLIP) for embeddings
+    4. Route to appropriate indexes:
        - Global embedding → visual_search_global
        - Person detections → visual_search_people
        - Vehicle detections → visual_search_vehicles
+    5. Auto-detect near-duplicates and assign to groups (if enabled)
 
     Args:
         file: Image file (JPEG/PNG)
         image_id: Unique identifier (auto-generated if not provided)
         image_path: File path for retrieval (defaults to image_id)
         metadata: JSON string for custom metadata
+        skip_duplicates: If True, skip processing if image hash exists.
+                        Set to False for benchmarks. Default: True.
+        detect_near_duplicates: If True, check for similar images and
+                               auto-assign to duplicate groups. Default: True.
+        near_duplicate_threshold: Similarity threshold for grouping (0.5-1.0).
+                                 Default: 0.99 (matches Immich).
 
     Returns:
-        Ingestion result with counts per category
+        Ingestion result with counts per category, or duplicate info if skipped
     """
     try:
         if not file.content_type or not file.content_type.startswith('image/'):
@@ -368,17 +395,32 @@ async def ingest_image(
             image_id=image_id,
             image_path=image_path,
             metadata=metadata_dict,
+            skip_duplicates=skip_duplicates,
+            detect_near_duplicates=detect_near_duplicates,
+            near_duplicate_threshold=near_duplicate_threshold,
         )
+
+        # Handle duplicate detection response
+        if result['status'] == 'duplicate':
+            return {
+                'status': 'duplicate',
+                'image_id': image_id,
+                'existing_image_id': result.get('existing_image_id'),
+                'existing_image_path': result.get('existing_image_path'),
+                'imohash': result.get('imohash'),
+                'message': result.get('message', 'Image already exists'),
+            }
 
         if result['status'] == 'error':
             raise HTTPException(500, result.get('error', 'Ingestion failed'))
 
         indexed = result.get('indexed', {})
-        return {
+        response = {
             'status': 'success',
             'image_id': image_id,
             'num_detections': result['num_detections'],
             'embedding_norm': result.get('embedding_norm', 0.0),
+            'imohash': result.get('imohash'),
             'indexed': {
                 'global': indexed.get('global', False),
                 'vehicles': indexed.get('vehicles', 0),
@@ -390,6 +432,12 @@ async def ingest_image(
                 f'{indexed.get("people", 0)} people'
             ),
         }
+
+        # Include near-duplicate info if found
+        if result.get('near_duplicate'):
+            response['near_duplicate'] = result['near_duplicate']
+
+        return response
 
     except HTTPException:
         raise
@@ -1461,3 +1509,389 @@ def predict_unified(
     except Exception as e:
         logger.error(f'Unified pipeline failed: {e}')
         raise HTTPException(500, f'Unified pipeline failed: {e!s}') from e
+
+
+# =============================================================================
+# Duplicate Detection Endpoints (Near-Duplicate via CLIP Similarity)
+# =============================================================================
+
+
+@router.post('/duplicates/find')
+async def find_duplicates(
+    search_service: VisualSearchDep,
+    image_id: str = Query(..., description='Image ID to find duplicates for'),
+    threshold: float = Query(
+        0.90, ge=0.5, le=1.0, description='Similarity threshold (0.90=more, 0.99=strict)'
+    ),
+    max_results: int = Query(50, ge=1, le=200, description='Maximum number of duplicates'),
+):
+    """
+    Find near-duplicates for a specific image using CLIP similarity.
+
+    Searches for images with similar visual content (same scene, different
+    crops/angles/lighting). Does NOT check imohash (use /ingest for exact duplicates).
+
+    **For GUI "show similar" feature**: Use threshold=0.90 to show more results.
+    **For strict duplicate detection**: Use threshold=0.99 (Immich default).
+
+    Threshold guide:
+    - 0.99: Nearly identical (Immich default - crops, resizes, compression)
+    - 0.95-0.98: Very similar (same scene, slight variations)
+    - 0.90-0.95: Similar content (same subject, different angle)
+    - <0.90: Related but distinct images
+
+    Args:
+        image_id: ID of image to find duplicates for
+        threshold: Minimum similarity score (default 0.95)
+        max_results: Maximum duplicates to return
+
+    Returns:
+        List of duplicate matches with similarity scores
+    """
+    from src.services.duplicate_detection import DuplicateDetectionService
+
+    try:
+        start_time = time.time()
+
+        dup_service = DuplicateDetectionService(search_service.opensearch)
+        duplicates = await dup_service.find_duplicates(
+            image_id=image_id,
+            threshold=threshold,
+            max_results=max_results,
+        )
+
+        search_time = (time.time() - start_time) * 1000
+
+        return {
+            'status': 'success',
+            'image_id': image_id,
+            'threshold': threshold,
+            'duplicates': [
+                {
+                    'image_id': d.image_id,
+                    'image_path': d.image_path,
+                    'similarity': round(d.similarity, 4),
+                    'duplicate_group_id': d.duplicate_group_id,
+                }
+                for d in duplicates
+            ],
+            'count': len(duplicates),
+            'search_time_ms': round(search_time, 2),
+        }
+
+    except Exception as e:
+        logger.error(f'Find duplicates failed: {e}')
+        raise HTTPException(500, f'Find duplicates failed: {e!s}') from e
+
+
+@router.post('/duplicates/find_by_image')
+async def find_duplicates_by_image(
+    search_service: VisualSearchDep,
+    image: UploadFile = File(..., description='Image to find duplicates for'),
+    threshold: float = Query(
+        0.90, ge=0.5, le=1.0, description='Similarity threshold (0.90=more, 0.99=strict)'
+    ),
+    max_results: int = Query(50, ge=1, le=200, description='Maximum results'),
+):
+    """
+    Find near-duplicates by uploading an image (doesn't need to be indexed).
+
+    **Perfect for GUI "find similar" feature** - upload any image to find matches.
+    Use threshold=0.90 for "show similar", threshold=0.99 for strict duplicate check.
+
+    Args:
+        image: Image file to check
+        threshold: Minimum similarity score
+        max_results: Maximum duplicates to return
+
+    Returns:
+        List of similar images in the index
+    """
+    from src.services.duplicate_detection import DuplicateDetectionService
+
+    try:
+        start_time = time.time()
+        image_bytes = image.file.read()
+
+        # Get embedding for the uploaded image
+        inference_service = InferenceService()
+        embedding = inference_service.encode_image_sync(image_bytes)
+
+        dup_service = DuplicateDetectionService(search_service.opensearch)
+        duplicates = await dup_service.find_duplicates_by_embedding(
+            embedding=embedding,
+            threshold=threshold,
+            max_results=max_results,
+        )
+
+        search_time = (time.time() - start_time) * 1000
+
+        return {
+            'status': 'success',
+            'threshold': threshold,
+            'duplicates': [
+                {
+                    'image_id': d.image_id,
+                    'image_path': d.image_path,
+                    'similarity': round(d.similarity, 4),
+                    'duplicate_group_id': d.duplicate_group_id,
+                }
+                for d in duplicates
+            ],
+            'count': len(duplicates),
+            'search_time_ms': round(search_time, 2),
+        }
+
+    except Exception as e:
+        logger.error(f'Find duplicates by image failed: {e}')
+        raise HTTPException(500, f'Find duplicates failed: {e!s}') from e
+
+
+@router.post('/duplicates/scan')
+async def scan_for_duplicates(
+    search_service: VisualSearchDep,
+    threshold: float = Query(
+        0.99, ge=0.5, le=1.0, description='Similarity threshold (0.99=Immich default)'
+    ),
+    max_images: int | None = Query(None, ge=1, description='Max images to scan (None = all)'),
+):
+    """
+    Scan the entire index and create duplicate groups.
+
+    This is a potentially long-running operation. For large indexes,
+    consider running with max_images to process in batches.
+
+    Algorithm:
+    1. Get all ungrouped images
+    2. For each, find near-duplicates above threshold
+    3. Create groups with first image as primary
+    4. Skip images already in a group
+
+    Args:
+        threshold: Similarity threshold for grouping
+        max_images: Maximum images to scan (None = all)
+
+    Returns:
+        Scan statistics
+    """
+    from src.services.duplicate_detection import DuplicateDetectionService
+
+    try:
+        dup_service = DuplicateDetectionService(search_service.opensearch)
+        stats = await dup_service.scan_and_group(
+            threshold=threshold,
+            max_images=max_images,
+        )
+
+        return {
+            'status': 'success',
+            'threshold': threshold,
+            'total_images': stats.total_images,
+            'images_scanned': stats.images_scanned,
+            'groups_created': stats.groups_created,
+            'duplicates_found': stats.duplicates_found,
+            'already_grouped': stats.already_grouped,
+            'scan_time_seconds': round(stats.scan_time_seconds, 2),
+        }
+
+    except Exception as e:
+        logger.error(f'Duplicate scan failed: {e}')
+        raise HTTPException(500, f'Duplicate scan failed: {e!s}') from e
+
+
+@router.get('/duplicates/groups')
+async def get_duplicate_groups(
+    search_service: VisualSearchDep,
+    min_size: int = Query(2, ge=2, description='Minimum group size'),
+    page: int = Query(0, ge=0, description='Page number'),
+    size: int = Query(50, ge=1, le=200, description='Page size'),
+):
+    """
+    Get all duplicate groups.
+
+    Returns groups sorted by size (largest first).
+
+    Args:
+        min_size: Minimum members per group
+        page: Page number (0-indexed)
+        size: Results per page
+
+    Returns:
+        List of duplicate groups with metadata
+    """
+    from src.services.duplicate_detection import DuplicateDetectionService
+
+    try:
+        dup_service = DuplicateDetectionService(search_service.opensearch)
+        groups = await dup_service.get_duplicate_groups(
+            min_size=min_size,
+            page=page,
+            size=size,
+        )
+
+        return {
+            'status': 'success',
+            'page': page,
+            'size': size,
+            'groups': [
+                {
+                    'group_id': g.group_id,
+                    'primary_image_id': g.primary_image_id,
+                    'primary_image_path': g.primary_image_path,
+                    'member_count': g.member_count,
+                }
+                for g in groups
+            ],
+            'count': len(groups),
+        }
+
+    except Exception as e:
+        logger.error(f'Get duplicate groups failed: {e}')
+        raise HTTPException(500, f'Get groups failed: {e!s}') from e
+
+
+@router.get('/duplicates/group/{group_id}')
+async def get_duplicate_group_members(
+    search_service: VisualSearchDep,
+    group_id: str,
+    include_primary: bool = Query(True, description='Include primary image in results'),
+):
+    """
+    Get all members of a specific duplicate group.
+
+    Returns members sorted by similarity score (primary first, then highest similarity).
+
+    Args:
+        group_id: Duplicate group ID
+        include_primary: Whether to include the primary image
+
+    Returns:
+        List of group members with metadata
+    """
+    from src.services.duplicate_detection import DuplicateDetectionService
+
+    try:
+        dup_service = DuplicateDetectionService(search_service.opensearch)
+        members = await dup_service.get_group_members(
+            group_id=group_id,
+            include_primary=include_primary,
+        )
+
+        if not members:
+            raise HTTPException(404, f'Group not found: {group_id}')
+
+        return {
+            'status': 'success',
+            'group_id': group_id,
+            'members': members,
+            'count': len(members),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Get group members failed: {e}')
+        raise HTTPException(500, f'Get group members failed: {e!s}') from e
+
+
+@router.delete('/duplicates/group/{group_id}/member/{image_id}')
+async def remove_from_duplicate_group(
+    search_service: VisualSearchDep,
+    group_id: str,
+    image_id: str,
+):
+    """
+    Remove an image from a duplicate group.
+
+    If removing the primary image, the next highest-scored member becomes primary.
+
+    Args:
+        group_id: Duplicate group ID
+        image_id: Image ID to remove
+
+    Returns:
+        Success status
+    """
+    from src.services.duplicate_detection import DuplicateDetectionService
+
+    try:
+        dup_service = DuplicateDetectionService(search_service.opensearch)
+        success = await dup_service.remove_from_group(image_id)
+
+        if not success:
+            raise HTTPException(404, f'Image not found or not in group: {image_id}')
+
+        return {
+            'status': 'success',
+            'message': f'Removed {image_id} from group {group_id}',
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Remove from group failed: {e}')
+        raise HTTPException(500, f'Remove from group failed: {e!s}') from e
+
+
+@router.post('/duplicates/groups/merge')
+async def merge_duplicate_groups(
+    search_service: VisualSearchDep,
+    group_ids: list[str] = Body(..., description='List of group IDs to merge'),
+):
+    """
+    Merge multiple duplicate groups into one.
+
+    The primary of the first group becomes the new primary.
+
+    Args:
+        group_ids: List of group IDs to merge (minimum 2)
+
+    Returns:
+        The merged group ID
+    """
+    from src.services.duplicate_detection import DuplicateDetectionService
+
+    try:
+        if len(group_ids) < 2:
+            raise HTTPException(400, 'Need at least 2 groups to merge')
+
+        dup_service = DuplicateDetectionService(search_service.opensearch)
+        merged_id = await dup_service.merge_groups(group_ids)
+
+        return {
+            'status': 'success',
+            'merged_group_id': merged_id,
+            'groups_merged': len(group_ids),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Merge groups failed: {e}')
+        raise HTTPException(500, f'Merge groups failed: {e!s}') from e
+
+
+@router.get('/duplicates/stats')
+async def get_duplicate_stats(
+    search_service: VisualSearchDep,
+):
+    """
+    Get duplicate detection statistics.
+
+    Returns:
+        Statistics about duplicate groups and images
+    """
+    from src.services.duplicate_detection import DuplicateDetectionService
+
+    try:
+        dup_service = DuplicateDetectionService(search_service.opensearch)
+        stats = await dup_service.get_stats()
+
+        return {
+            'status': 'success',
+            **stats,
+        }
+
+    except Exception as e:
+        logger.error(f'Get duplicate stats failed: {e}')
+        raise HTTPException(500, f'Get stats failed: {e!s}') from e
