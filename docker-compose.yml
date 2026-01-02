@@ -19,32 +19,30 @@ services:
       - --strict-model-config=false
       - --model-control-mode=explicit
       # ===================================================================
-      # MULTI-TRACK BENCHMARK CONFIGURATION
+      # TRACK E ONLY CONFIGURATION (Visual Search + Face Detection)
       # ===================================================================
-      # GPU 0: Track B, C (standalone), Track E (visual search)
-      # GPU 2: Track D (DALI ensembles - batch/streaming)
-      # Track A: PyTorch in yolo-api (no Triton models needed)
+      # Optimized for Track E with maximum GPU memory for face models
+      # GPU 0: Track E visual search (YOLO + MobileCLIP)
       # ===================================================================
       #
-      # Track B (GPU 0): Standard TRT with CPU NMS
-      - --load-model=yolov11_small_trt                 # YOLO detection (TRT + CPU NMS via Ultralytics)
-      #
-      # Track C (GPU 0): End2End TRT standalone
+      # Track E Core: YOLO Detection + MobileCLIP Embeddings
       - --load-model=yolov11_small_trt_end2end         # YOLO detection (TRT + GPU NMS)
-      #
-      # Track D (GPU 2): DALI + End2End ensemble (batch only - images)
-      # Uses shared yolov11_small_trt_end2end model (same as Track C/E)
-      - --load-model=yolo_preprocess_dali_batch        # DALI preprocessing (batch)
-      - --load-model=yolov11_small_gpu_e2e_batch       # Track D ensemble (batch)
-      #
-      # Track E (GPU 0): Visual Search with MobileCLIP
       - --load-model=yolo_clip_preprocess_dali         # Fast DALI (YOLO 640 + CLIP 256)
       - --load-model=dual_preprocess_dali              # Triple-branch DALI (includes HD crop)
       - --load-model=mobileclip2_s2_image_encoder      # Image embeddings (TensorRT)
       - --load-model=mobileclip2_s2_text_encoder       # Text embeddings (TensorRT)
       - --load-model=box_embedding_extractor           # Per-box embeddings (Python + BLS)
-      - --load-model=yolo_clip_ensemble                # Track E simple ensemble
-      - --load-model=yolo_mobileclip_ensemble          # Track E full ensemble
+      - --load-model=yolo_clip_ensemble                # Track E basic (detection + global embed)
+      - --load-model=yolo_mobileclip_ensemble          # Track E full (+ per-box embeddings)
+      #
+      # Track E Face Detection & Recognition
+      - --load-model=quad_preprocess_dali             # Quad-branch DALI (YOLO + CLIP + SCRFD + HD)
+      - --load-model=scrfd_10g_face_detect            # Face detection (TensorRT)
+      - --load-model=arcface_w600k_r50                # Face recognition (TensorRT)
+      - --load-model=face_pipeline                    # Face pipeline (Python backend)
+      - --load-model=yolo_face_clip_ensemble          # Unified ensemble (YOLO + CLIP + SCRFD + ArcFace)
+      - --load-model=unified_embedding_extractor      # Unified extractor (box + face)
+      - --load-model=yolo_unified_ensemble            # Efficient pipeline (face detection on person crops only)
       # ===================================================================
       - --log-verbose=1
       - --log-info=true
@@ -57,7 +55,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: [ '0', '2' ]  # GPU 0: Track C/E, GPU 2: Track D
+              device_ids: [ '0' ]  # GPU 0: Track E only (face models to be added)
               capabilities:
                 - gpu
     networks:
@@ -82,8 +80,11 @@ services:
       - ./test_images:/app/test_images
       - ./reference_repos:/app/reference_repos  # Track E: MobileCLIP repos (persisted)
       - ./cache/huggingface:/home/appuser/.cache/huggingface  # Track E: HuggingFace tokenizers (appuser)
+      - ./outputs:/app/outputs  # Track E: Mosaic outputs and clustering results
+      - /mnt/nvm/KILLBOY_SAMPLE_PICTURES:/mnt/nvm/KILLBOY_SAMPLE_PICTURES:ro  # Test data (YOLO)
+      - /mnt/nvm/FACE_TEST_IMAGES:/mnt/nvm/FACE_TEST_IMAGES:ro  # Test data (faces)
     environment:
-      - ENABLE_PYTORCH=true  # Enable Track A for comparison testing
+      - ENABLE_PYTORCH=false  # Track A disabled - Track E only mode
       # HuggingFace cache configuration (appuser home directory)
       - HF_HOME=/home/appuser/.cache/huggingface
       - HF_HUB_CACHE=/home/appuser/.cache/huggingface/hub

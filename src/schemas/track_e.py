@@ -197,3 +197,89 @@ class IndexStatsResponse(BaseModel):
     status: str
     total_documents: int
     index_size_mb: float
+
+
+# =============================================================================
+# Face Detection & Recognition Responses
+# =============================================================================
+
+
+class FaceDetection(BaseModel):
+    """Individual face detection with landmarks."""
+
+    box: list[float] = Field(..., description='Face bounding box [x1, y1, x2, y2] normalized [0,1]')
+    landmarks: list[float] = Field(
+        ..., description='5-point facial landmarks [lx1,ly1,...,lx5,ly5] normalized [0,1]'
+    )
+    score: float = Field(..., description='Detection confidence score')
+    quality: float | None = Field(None, description='Face quality score (frontality, sharpness)')
+
+
+class FaceDetectResponse(BaseModel):
+    """Response for face detection only (SCRFD)."""
+
+    num_faces: int = Field(..., description='Number of faces detected')
+    faces: list[FaceDetection] = Field(default_factory=list, description='Detected faces')
+    status: str = Field(default='success')
+
+    # Image metadata
+    image: ImageMetadata | None = None
+
+    # Track metadata
+    track: str = Field(default='E_faces')
+    preprocessing: str = Field(default='gpu_dali')
+
+    # Timing
+    total_time_ms: float | None = None
+
+
+class FaceRecognizeResponse(BaseModel):
+    """Response for face detection + recognition (SCRFD + ArcFace)."""
+
+    num_faces: int = Field(..., description='Number of faces detected')
+    faces: list[FaceDetection] = Field(default_factory=list, description='Detected faces')
+    embeddings: list[list[float]] = Field(
+        default_factory=list, description='512-dim ArcFace embeddings per face'
+    )
+    status: str = Field(default='success')
+
+    # Image metadata
+    image: ImageMetadata | None = None
+
+    # Track metadata
+    track: str = Field(default='E_faces')
+    preprocessing: str = Field(default='gpu_dali')
+    model: str = Field(default='scrfd_10g + arcface_w600k_r50')
+
+    # Timing
+    total_time_ms: float | None = None
+
+
+class FaceFullResponse(BaseModel):
+    """Response for unified YOLO + Face + CLIP pipeline."""
+
+    # YOLO detections
+    detections: list[dict[str, Any]] = Field(default_factory=list)
+    num_detections: int = Field(default=0)
+
+    # Face detections and embeddings
+    num_faces: int = Field(default=0)
+    faces: list[FaceDetection] = Field(default_factory=list)
+    face_embeddings: list[list[float]] = Field(default_factory=list)
+
+    # Global embedding
+    embedding_norm: float | None = Field(None, description='L2 norm of global embedding')
+
+    status: str = Field(default='success')
+
+    # Image metadata
+    image: ImageMetadata | None = None
+    model: ModelMetadata | None = None
+
+    # Track metadata
+    track: str = Field(default='E_full_faces')
+    preprocessing: str = Field(default='gpu_dali')
+    nms_location: str = Field(default='gpu')
+
+    # Timing
+    total_time_ms: float | None = None

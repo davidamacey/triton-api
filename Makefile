@@ -910,6 +910,64 @@ setup-track-e: ## Complete Track E setup (models + DALI + configs)
 	@echo "Track E setup complete!"
 
 # ==================================================================================
+# Face Detection & Recognition (Track E Extension)
+# ==================================================================================
+
+.PHONY: download-face-models
+download-face-models: ## Download SCRFD and ArcFace face models
+	@echo "Downloading face detection and recognition models..."
+	$(COMPOSE) exec $(API_SERVICE) python /app/export/download_face_models.py
+
+.PHONY: export-face-detection
+export-face-detection: ## Export SCRFD to TensorRT
+	@echo "Exporting SCRFD face detection to TensorRT..."
+	$(COMPOSE) exec $(API_SERVICE) python /app/export/export_face_detection.py
+	@$(MAKE) load-face-models
+
+.PHONY: export-face-recognition
+export-face-recognition: ## Export ArcFace to TensorRT
+	@echo "Exporting ArcFace face recognition to TensorRT..."
+	$(COMPOSE) exec $(API_SERVICE) python /app/export/export_face_recognition.py
+	@$(MAKE) load-face-models
+
+.PHONY: load-face-models
+load-face-models: ## Load face models into Triton
+	@echo "Loading face models into Triton..."
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/scrfd_10g_face_detect/load" || true
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/arcface_w600k_r50/load" || true
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/scrfd_postprocess/load" || true
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/face_embedding_extractor/load" || true
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/quad_preprocess_dali/load" || true
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/yolo_face_clip_ensemble/load" || true
+	@echo "Face models loaded."
+
+.PHONY: create-dali-quad
+create-dali-quad: ## Create quad-branch DALI pipeline (YOLO + CLIP + SCRFD + HD)
+	@echo "Creating Track E quad-branch DALI pipeline..."
+	@echo "Outputs: yolo_images (640x640), clip_images (256x256), face_images (640x640), original_images (max 1920px)"
+	$(COMPOSE) exec $(API_SERVICE) bash -c "cd /app && PYTHONPATH=/app python dali/create_quad_dali_pipeline.py"
+	@$(MAKE) load-face-models
+
+.PHONY: setup-face-pipeline
+setup-face-pipeline: download-face-models export-face-detection export-face-recognition create-dali-quad ## Complete face pipeline setup
+	@echo "Face pipeline setup complete!"
+	@echo ""
+	@echo "Loaded models:"
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/index" | grep -E "(scrfd|arcface|face_embedding|quad_preprocess)" || true
+
+.PHONY: download-face-test-data
+download-face-test-data: ## Download LFW and WIDER Face test datasets
+	@echo "Downloading face test datasets..."
+	@bash $(SCRIPTS_DIR)/setup_face_test_data.sh --all
+	@echo ""
+	@echo "Datasets downloaded to test_images/faces/"
+
+.PHONY: test-track-e-faces
+test-track-e-faces: ## Test face detection and recognition in Triton
+	@echo "Testing face models in Triton..."
+	@$(COMPOSE) exec $(API_SERVICE) python -c "import numpy as np; import tritonclient.grpc as grpcclient; client = grpcclient.InferenceServerClient('triton-api:8001'); print('Testing SCRFD...'); inputs = [grpcclient.InferInput('input.1', [1, 3, 640, 640], 'FP32')]; inputs[0].set_data_from_numpy(np.random.rand(1, 3, 640, 640).astype(np.float32)); result = client.infer('scrfd_10g_face_detect', inputs); print('  SCRFD outputs:', [o.name for o in result.get_response().outputs]); print('Testing ArcFace...'); inputs = [grpcclient.InferInput('input.1', [1, 3, 112, 112], 'FP32')]; inputs[0].set_data_from_numpy(np.random.rand(1, 3, 112, 112).astype(np.float32)); result = client.infer('arcface_w600k_r50', inputs); print('  ArcFace embedding shape:', result.as_numpy('683').shape); print('Face models working!')"
+
+# ==================================================================================
 # Monitoring and Metrics
 # ==================================================================================
 
@@ -941,6 +999,47 @@ gpu: ## Show GPU status
 .PHONY: gpu-watch
 gpu-watch: ## Watch GPU status (updates every second)
 	@watch -n 1 nvidia-smi
+
+# ==================================================================================
+# Triton Model Management
+# ==================================================================================
+
+.PHONY: triton-unload-all
+triton-unload-all: ## Unload all models from Triton server
+	@echo "Unloading all models from Triton..."
+	@for model in $$(curl -s -X POST http://localhost:$(TRITON_HTTP_PORT)/v2/repository/index | jq -r '.[].name'); do \
+		echo "  Unloading $$model..."; \
+		curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/$$model/unload" > /dev/null; \
+	done
+	@sleep 3
+	@echo ""
+	@echo "READY models remaining:"
+	@curl -s -X POST http://localhost:$(TRITON_HTTP_PORT)/v2/repository/index | jq -r '.[] | select(.state == "READY") | .name'
+
+.PHONY: triton-models
+triton-models: ## List all Triton models and their state
+	@echo "Triton Model Repository:"
+	@curl -s -X POST http://localhost:$(TRITON_HTTP_PORT)/v2/repository/index | jq -r '.[] | "\(.name): \(.state)"'
+
+.PHONY: triton-load
+triton-load: ## Load a model into Triton (usage: make triton-load MODEL=model_name)
+	@if [ -z "$(MODEL)" ]; then \
+		echo "Error: MODEL parameter required"; \
+		echo "Usage: make triton-load MODEL=model_name"; \
+		exit 1; \
+	fi
+	@echo "Loading $(MODEL) into Triton..."
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/$(MODEL)/load" | jq '.'
+
+.PHONY: triton-unload
+triton-unload: ## Unload a model from Triton (usage: make triton-unload MODEL=model_name)
+	@if [ -z "$(MODEL)" ]; then \
+		echo "Error: MODEL parameter required"; \
+		echo "Usage: make triton-unload MODEL=model_name"; \
+		exit 1; \
+	fi
+	@echo "Unloading $(MODEL) from Triton..."
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/$(MODEL)/unload" | jq '.'
 
 # ==================================================================================
 # Cleanup
@@ -1233,6 +1332,7 @@ clone-ref: ## Clone a specific reference repo (usage: make clone-ref REPO=ultral
         validate-dali validate-dali-dual \
         export-mobileclip setup-track-e \
         open-grafana open-prometheus open-opensearch metrics gpu gpu-watch \
+        triton-unload-all triton-models triton-load triton-unload \
         clean clean-all clean-logs clean-bench clean-exports \
         opensearch-reset opensearch-status opensearch-indices \
         test-api-health test-track-a test-track-b test-track-c test-track-d test-track-e \

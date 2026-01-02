@@ -369,3 +369,26 @@ The deployment includes a complete monitoring stack:
 - **OpenSearch Dashboards**: Vector search management (port 4608)
 
 View dashboards at http://localhost:4605 after starting services.
+
+## Test Data
+
+Test image datasets for benchmarking and validation:
+
+| Dataset | Location | Images | Purpose |
+|---------|----------|--------|---------|
+| LFW Deep Funneled | `test_images/faces/lfw-deepfunneled` | 13,233 | Face detection/recognition validation |
+| KILLBOY Sample | `/mnt/nvm/KILLBOY_SAMPLE_PICTURES` | 1,138 | Real-world multi-category testing (YOLO) |
+| Face Test Images | `/mnt/nvm/FACE_TEST_IMAGES` | varies | Bulk face ingestion testing |
+
+**Ingestion commands:**
+```bash
+# Face-only ingestion (LFW)
+docker compose exec yolo-api python /app/scripts/ingest_and_cluster_faces.py \
+    --images-dir /app/test_images/faces/lfw-deepfunneled \
+    --max-images 500 --create-mosaics
+
+# Multi-index ingestion (faces, people, vehicles, global)
+docker compose exec yolo-api python /app/scripts/ingest_all_indexes.py \
+    --images-dir /mnt/nvm/KILLBOY_SAMPLE_PICTURES \
+    --max-images 500 --create-mosaics
+```

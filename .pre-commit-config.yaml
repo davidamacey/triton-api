@@ -5,7 +5,7 @@
 repos:
   # Ruff: Fast Python linter and formatter (replaces black, isort, flake8, pylint)
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
+    rev: v0.14.0
     hooks:
       # Run the linter
       - id: ruff
@@ -41,8 +41,11 @@ repos:
     rev: v1.10.0
     hooks:
       - id: python-check-blanket-noqa
+        exclude: ^src/ultralytics_patches/
       - id: python-check-blanket-type-ignore
+        exclude: ^src/ultralytics_patches/
       - id: python-no-eval
+        exclude: ^(src/ultralytics_patches/|export/)  # PyTorch model.eval() is safe
       - id: python-use-type-annotations
 
 # Global configuration

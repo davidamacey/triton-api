@@ -73,9 +73,7 @@ class TritonClient:
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
         self.retry_max_delay = retry_max_delay
-        logger.info(
-            f'Unified Triton client initialized (sync, retries={max_retries})'
-        )
+        logger.info(f'Unified Triton client initialized (sync, retries={max_retries})')
 
     def _infer_with_retry(self, model_name: str, inputs: list, outputs: list):
         """
@@ -490,8 +488,7 @@ class TritonClient:
         workers = min(max_workers, batch_size)
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(process_single, i, img): i
-                for i, img in enumerate(images_bytes)
+                executor.submit(process_single, i, img): i for i, img in enumerate(images_bytes)
             }
 
             for future in as_completed(futures):
@@ -524,9 +521,7 @@ class TritonClient:
         output = InferRequestedOutput('image_embeddings')
 
         # Sync inference with retry
-        response = self._infer_with_retry(
-            'mobileclip2_s2_image_encoder', [input_tensor], [output]
-        )
+        response = self._infer_with_retry('mobileclip2_s2_image_encoder', [input_tensor], [output])
 
         return response.as_numpy('image_embeddings')[0]
 
@@ -548,9 +543,7 @@ class TritonClient:
         output = InferRequestedOutput('text_embeddings')
 
         # Sync inference with retry
-        response = self._infer_with_retry(
-            'mobileclip2_s2_text_encoder', [input_tensor], [output]
-        )
+        response = self._infer_with_retry('mobileclip2_s2_text_encoder', [input_tensor], [output])
 
         return response.as_numpy('text_embeddings')[0]
 
@@ -661,13 +654,12 @@ class TritonClient:
         # Calculate padding
         pad_w = (target_size - new_w) / 2.0
         pad_h = (target_size - new_h) / 2.0
-        top, bottom = int(round(pad_h - 0.1)), int(round(pad_h + 0.1))
-        left, right = int(round(pad_w - 0.1)), int(round(pad_w + 0.1))
+        top, bottom = round(pad_h - 0.1), round(pad_h + 0.1)
+        left, right = round(pad_w - 0.1), round(pad_w + 0.1)
 
         # Add padding (gray = 114)
         letterboxed = cv2.copyMakeBorder(
-            resized, top, bottom, left, right,
-            cv2.BORDER_CONSTANT, value=(114, 114, 114)
+            resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114)
         )
 
         # Ensure exact size (rounding may cause 1px difference)
@@ -707,7 +699,7 @@ class TritonClient:
         # Center crop to 256x256
         start_x = (new_w - target_size) // 2
         start_y = (new_h - target_size) // 2
-        cropped = resized[start_y:start_y + target_size, start_x:start_x + target_size]
+        cropped = resized[start_y : start_y + target_size, start_x : start_x + target_size]
 
         # Normalize to [0, 1]
         normalized = cropped.astype(np.float32) / 255.0
@@ -755,7 +747,306 @@ class TritonClient:
         return img_array[np.newaxis, ...]  # Add batch dimension
 
     # =========================================================================
+    # Track E Faces: YOLO + Face + CLIP Unified Ensemble
+    # =========================================================================
+    def infer_faces_full(self, image_bytes: bytes) -> dict[str, Any]:
+        """
+        Full face recognition pipeline: YOLO + SCRFD + MobileCLIP + ArcFace.
+
+        All processing happens in Triton - single request, no round-trips:
+        1. GPU JPEG decode (nvJPEG via DALI)
+        2. Quad-branch preprocessing (YOLO 640, CLIP 256, SCRFD 640, HD original)
+        3. YOLO object detection (parallel with 4, 5)
+        4. MobileCLIP global embedding (parallel with 3, 5)
+        5. SCRFD face detection + NMS (parallel with 3, 4)
+        6. Per-box MobileCLIP embeddings (depends on 3)
+        7. Per-face ArcFace embeddings (depends on 5)
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+
+        Returns:
+            Dict with:
+                - YOLO detections (num_dets, boxes, scores, classes)
+                - Global MobileCLIP embedding (512-dim)
+                - Per-box MobileCLIP embeddings (300 x 512-dim)
+                - Face detections (num_faces, face_boxes, face_landmarks, face_scores)
+                - Face ArcFace embeddings (128 x 512-dim)
+                - Face quality scores
+        """
+        # Fast JPEG header parse for dimensions (~0.1ms)
+        orig_w, orig_h = get_jpeg_dimensions_fast(image_bytes)
+
+        # Get cached affine matrix (~0.001ms for cache hit)
+        affine_matrix, scale, padding = calculate_affine_matrix(orig_w, orig_h, self.input_size)
+
+        # Prepare inputs
+        input_data = np.frombuffer(image_bytes, dtype=np.uint8)
+        input_data = np.expand_dims(input_data, axis=0)
+
+        orig_shape = np.array([orig_h, orig_w], dtype=np.int32)
+        orig_shape = np.expand_dims(orig_shape, axis=0)
+
+        inputs = [
+            InferInput('encoded_images', input_data.shape, 'UINT8'),
+            InferInput('affine_matrices', [1, 2, 3], 'FP32'),
+            InferInput('orig_shape', [1, 2], 'INT32'),
+        ]
+        inputs[0].set_data_from_numpy(input_data)
+        inputs[1].set_data_from_numpy(np.expand_dims(affine_matrix, axis=0))
+        inputs[2].set_data_from_numpy(orig_shape)
+
+        # Request all outputs from unified ensemble
+        outputs = [
+            # YOLO detections
+            InferRequestedOutput('num_dets'),
+            InferRequestedOutput('det_boxes'),
+            InferRequestedOutput('det_scores'),
+            InferRequestedOutput('det_classes'),
+            # MobileCLIP global embedding
+            InferRequestedOutput('global_embeddings'),
+            # Face detections and embeddings
+            InferRequestedOutput('num_faces'),
+            InferRequestedOutput('face_boxes'),
+            InferRequestedOutput('face_landmarks'),
+            InferRequestedOutput('face_scores'),
+            InferRequestedOutput('face_embeddings'),
+            InferRequestedOutput('face_quality'),
+        ]
+
+        # Sync inference with retry
+        response = self._infer_with_retry('yolo_face_clip_ensemble', inputs, outputs)
+
+        # Parse YOLO outputs
+        num_dets = int(response.as_numpy('num_dets')[0][0])
+        boxes = response.as_numpy('det_boxes')[0][:num_dets]
+        scores = response.as_numpy('det_scores')[0][:num_dets]
+        classes = response.as_numpy('det_classes')[0][:num_dets]
+        image_embedding = response.as_numpy('global_embeddings')[0]
+
+        # Parse face outputs
+        num_faces_arr = response.as_numpy('num_faces')
+        num_faces = int(num_faces_arr.flatten()[0])
+        face_boxes_raw = response.as_numpy('face_boxes')
+        face_landmarks_raw = response.as_numpy('face_landmarks')
+        face_scores_raw = response.as_numpy('face_scores')
+
+        # Handle batch dimension
+        if face_boxes_raw.ndim == 3:
+            face_boxes = face_boxes_raw[0][:num_faces]
+            face_landmarks = face_landmarks_raw[0][:num_faces]
+            face_scores_arr = face_scores_raw[0][:num_faces]
+        else:
+            face_boxes = face_boxes_raw[:num_faces]
+            face_landmarks = face_landmarks_raw[:num_faces]
+            face_scores_arr = face_scores_raw[:num_faces]
+
+        # Parse face embeddings
+        if num_faces > 0:
+            face_emb_raw = response.as_numpy('face_embeddings')
+            face_quality_raw = response.as_numpy('face_quality')
+
+            # Handle batch dimension
+            if face_emb_raw.ndim == 3:
+                face_emb = face_emb_raw[0].reshape(-1, 512)[:num_faces]
+                face_quality_arr = face_quality_raw[0][:num_faces]
+            else:
+                face_emb = face_emb_raw.reshape(-1, 512)[:num_faces]
+                face_quality_arr = face_quality_raw[:num_faces]
+        else:
+            face_emb = np.array([])
+            face_quality_arr = np.array([])
+
+        return {
+            # YOLO detections
+            'num_dets': num_dets,
+            'boxes': boxes,
+            'scores': scores,
+            'classes': classes,
+            # MobileCLIP global embedding
+            'image_embedding': image_embedding,
+            # Face detections and embeddings
+            'num_faces': num_faces,
+            'face_boxes': face_boxes,
+            'face_landmarks': face_landmarks,
+            'face_scores': face_scores_arr,
+            'face_embeddings': face_emb,
+            'face_quality': face_quality_arr,
+            # Transform params
+            'orig_shape': (orig_h, orig_w),
+            'scale': scale,
+            'padding': padding,
+        }
+
+    def infer_faces_only(self, image_bytes: bytes) -> dict[str, Any]:
+        """
+        Face detection and recognition only (no YOLO).
+
+        Simpler pipeline for face-focused applications:
+        1. GPU JPEG decode + preprocess for SCRFD (640x640)
+        2. SCRFD face detection + NMS
+        3. Face alignment + ArcFace embedding extraction
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+
+        Returns:
+            Dict with face detections and ArcFace embeddings
+        """
+        # Use the full pipeline and extract face parts only
+        # This ensures we use the optimized DALI quad-branch
+        result = self.infer_faces_full(image_bytes)
+
+        return {
+            'num_faces': result['num_faces'],
+            'face_boxes': result['face_boxes'],
+            'face_landmarks': result['face_landmarks'],
+            'face_scores': result['face_scores'],
+            'face_embeddings': result['face_embeddings'],
+            'face_quality': result['face_quality'],
+            'orig_shape': result['orig_shape'],
+        }
+
+    # =========================================================================
     # Formatting Utilities (Shared across all tracks)
+    # =========================================================================
+    # Track E Unified: YOLO + MobileCLIP + Person-only Face Detection
+    # =========================================================================
+    def infer_unified(self, image_bytes: bytes) -> dict[str, Any]:
+        """
+        Unified pipeline: YOLO + MobileCLIP + person-only face detection.
+
+        More efficient than full-image face detection - runs SCRFD only on
+        person bounding box crops. Combines all embeddings in one request.
+
+        Pipeline:
+        1. GPU JPEG decode (nvJPEG via DALI)
+        2. Triple preprocessing (YOLO 640, CLIP 256, HD original)
+        3. YOLO object detection (parallel with 4)
+        4. MobileCLIP global embedding (parallel with 3)
+        5. Unified extraction:
+           - MobileCLIP per-box embeddings (all boxes)
+           - SCRFD face detection (person boxes only)
+           - ArcFace face embeddings
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+
+        Returns:
+            Dict with:
+                - YOLO detections (num_dets, boxes, scores, classes)
+                - Global MobileCLIP embedding (512-dim)
+                - Per-box MobileCLIP embeddings (300 x 512-dim)
+                - Face detections (num_faces, face_boxes, face_landmarks, face_scores)
+                - Face ArcFace embeddings (64 x 512-dim)
+                - Face person index (which person box each face belongs to)
+        """
+        # Fast JPEG header parse for dimensions
+        orig_w, orig_h = get_jpeg_dimensions_fast(image_bytes)
+
+        # Get cached affine matrix
+        affine_matrix, scale, padding = calculate_affine_matrix(orig_w, orig_h, self.input_size)
+
+        # Prepare inputs
+        input_data = np.frombuffer(image_bytes, dtype=np.uint8)
+        input_data = np.expand_dims(input_data, axis=0)
+
+        inputs = [
+            InferInput('encoded_images', input_data.shape, 'UINT8'),
+            InferInput('affine_matrices', [1, 2, 3], 'FP32'),
+        ]
+        inputs[0].set_data_from_numpy(input_data)
+        inputs[1].set_data_from_numpy(np.expand_dims(affine_matrix, axis=0))
+
+        # Request all outputs from unified ensemble
+        outputs = [
+            # YOLO detections
+            InferRequestedOutput('num_dets'),
+            InferRequestedOutput('det_boxes'),
+            InferRequestedOutput('det_scores'),
+            InferRequestedOutput('det_classes'),
+            # MobileCLIP embeddings
+            InferRequestedOutput('global_embeddings'),
+            InferRequestedOutput('box_embeddings'),
+            InferRequestedOutput('normalized_boxes'),
+            # Face detections and embeddings
+            InferRequestedOutput('num_faces'),
+            InferRequestedOutput('face_embeddings'),
+            InferRequestedOutput('face_boxes'),
+            InferRequestedOutput('face_landmarks'),
+            InferRequestedOutput('face_scores'),
+            InferRequestedOutput('face_person_idx'),
+        ]
+
+        # Sync inference with retry
+        response = self._infer_with_retry('yolo_unified_ensemble', inputs, outputs)
+
+        # Parse YOLO outputs
+        num_dets = int(response.as_numpy('num_dets')[0][0])
+        boxes = response.as_numpy('det_boxes')[0][:num_dets]
+        scores = response.as_numpy('det_scores')[0][:num_dets]
+        classes = response.as_numpy('det_classes')[0][:num_dets]
+
+        # Parse MobileCLIP outputs
+        global_embedding = response.as_numpy('global_embeddings')[0]
+        box_embeddings_raw = response.as_numpy('box_embeddings')
+        normalized_boxes_raw = response.as_numpy('normalized_boxes')
+
+        # Handle batch dimension
+        if box_embeddings_raw.ndim == 3:
+            box_embeddings = box_embeddings_raw[0][:num_dets]
+            normalized_boxes = normalized_boxes_raw[0][:num_dets]
+        else:
+            box_embeddings = box_embeddings_raw[:num_dets]
+            normalized_boxes = normalized_boxes_raw[:num_dets]
+
+        # Parse face outputs
+        num_faces_arr = response.as_numpy('num_faces')
+        num_faces = int(num_faces_arr.flatten()[0])
+
+        face_boxes_raw = response.as_numpy('face_boxes')
+        face_landmarks_raw = response.as_numpy('face_landmarks')
+        face_scores_raw = response.as_numpy('face_scores')
+        face_person_idx_raw = response.as_numpy('face_person_idx')
+        face_emb_raw = response.as_numpy('face_embeddings')
+
+        # Handle batch dimension for faces
+        if face_boxes_raw.ndim == 3:
+            face_boxes = face_boxes_raw[0][:num_faces]
+            face_landmarks = face_landmarks_raw[0][:num_faces]
+            face_scores_arr = face_scores_raw[0][:num_faces]
+            face_person_idx = face_person_idx_raw[0][:num_faces]
+            face_embeddings = face_emb_raw[0][:num_faces] if num_faces > 0 else np.array([])
+        else:
+            face_boxes = face_boxes_raw[:num_faces]
+            face_landmarks = face_landmarks_raw[:num_faces]
+            face_scores_arr = face_scores_raw[:num_faces]
+            face_person_idx = face_person_idx_raw[:num_faces]
+            face_embeddings = face_emb_raw[:num_faces] if num_faces > 0 else np.array([])
+
+        return {
+            # YOLO detections
+            'num_dets': num_dets,
+            'boxes': boxes,
+            'scores': scores,
+            'classes': classes,
+            # MobileCLIP embeddings
+            'global_embedding': global_embedding,
+            'box_embeddings': box_embeddings,
+            'normalized_boxes': normalized_boxes,
+            # Face detections and embeddings (from person crops only)
+            'num_faces': num_faces,
+            'face_boxes': face_boxes,
+            'face_landmarks': face_landmarks,
+            'face_scores': face_scores_arr,
+            'face_embeddings': face_embeddings,
+            'face_person_idx': face_person_idx,
+            # Transform params
+            'orig_shape': (orig_h, orig_w),
+            'scale': scale,
+            'padding': padding,
+        }
+
     # =========================================================================
     @staticmethod
     def format_detections(result: dict[str, Any]) -> list:

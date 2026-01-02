@@ -145,10 +145,14 @@ timeout: 30 seconds
 
 ```bash
 # Unload all models
-bash unload_all.sh
+make triton-unload-all
 
-# Load specific track models
-curl -X POST "http://localhost:4600/v2/repository/models/MODEL_NAME/load"
+# List all models and their state
+make triton-models
+
+# Load/unload specific model
+make triton-load MODEL=yolov11_small_trt_end2end
+make triton-unload MODEL=yolov11_small_trt_end2end
 
 # Run stress test with all images
 ./triton_bench --mode matrix --track TRACK --limit 1138 --matrix-clients 64,128,256,512 --duration 60

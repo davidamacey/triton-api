@@ -111,6 +111,10 @@ var allTracks = []Track{
 	{ID: "E_batch16", Name: "DALI+YOLO+CLIP Batch-16", URL: "http://localhost:4603/track_e/predict_batch", Description: "Batch 16 images per request"},
 	{ID: "E_batch32", Name: "DALI+YOLO+CLIP Batch-32", URL: "http://localhost:4603/track_e/predict_batch", Description: "Batch 32 images per request"},
 	{ID: "E_batch64", Name: "DALI+YOLO+CLIP Batch-64", URL: "http://localhost:4603/track_e/predict_batch", Description: "Batch 64 images per request"},
+	{ID: "E_faces", Name: "SCRFD+ArcFace (faces)", URL: "http://localhost:4603/track_e/faces/recognize", Description: "Face detection + ArcFace embeddings"},
+	{ID: "E_faces_detect", Name: "SCRFD Only (detect)", URL: "http://localhost:4603/track_e/faces/detect", Description: "Face detection only (no embeddings)"},
+	{ID: "E_quad", Name: "Quad Pipeline (full)", URL: "http://localhost:4603/track_e/faces/full", Description: "YOLO + CLIP + SCRFD + ArcFace (unified)"},
+	{ID: "E_unified", Name: "Unified (person-only)", URL: "http://localhost:4603/track_e/unified", Description: "YOLO + CLIP + face detection on person crops"},
 	{ID: "F", Name: "CPU+TRT Direct", URL: "http://localhost:4603/track_f/predict", Description: "CPU preprocessing + direct TRT (no DALI)"},
 }
 
@@ -130,7 +134,7 @@ func main() {
 		clients       = flag.Int("clients", 64, "Number of concurrent clients")
 		duration      = flag.Int("duration", 60, "Test duration in seconds")
 		warmup        = flag.Int("warmup", 10, "Number of warmup requests per track")
-		track         = flag.String("track", "all", "Track filter (A, B, C, D_*, E, E_full, E_batch16/32/64, F, or all)")
+		track         = flag.String("track", "all", "Track filter (A, B, C, D_*, E, E_full, E_batch*, E_faces, E_faces_detect, E_quad, F, or all)")
 		output        = flag.String("output", "results/benchmark_results.json", "Output JSON file")
 		quiet         = flag.Bool("quiet", false, "Quiet mode (minimal output)")
 		jsonOut       = flag.Bool("json", false, "JSON output only")
@@ -1027,32 +1031,34 @@ func runWarmup(track Track, images [][]byte, count int, quiet bool, config *Benc
 func loadImages(dir string, limit int) ([][]byte, error) {
 	images := make([][]byte, 0, limit)
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+	// Use filepath.Walk for recursive directory search
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Skip files we can't access
+		}
+		if info.IsDir() {
+			return nil // Continue into subdirectories
+		}
+		if len(images) >= limit {
+			return filepath.SkipAll // Stop once we have enough images
 		}
 
-		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		ext := strings.ToLower(filepath.Ext(info.Name()))
 		if ext != ".jpg" && ext != ".jpeg" {
-			continue
+			return nil
 		}
 
-		path := filepath.Join(dir, entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
-			continue
+			return nil // Skip files we can't read
 		}
 
 		images = append(images, data)
+		return nil
+	})
 
-		if len(images) >= limit {
-			break
-		}
+	if err != nil && err != filepath.SkipAll {
+		return nil, err
 	}
 
 	if len(images) == 0 {
@@ -1498,14 +1504,17 @@ func filterRelevantModels(models []ModelStats, trackFilter string) []ModelStats 
 
 	// Define model prefixes for each track
 	trackPrefixes := map[string][]string{
-		"A":           {}, // PyTorch - no Triton models
-		"B":           {"yolov11_small_trt"},
-		"C":           {"yolov11_small_trt_end2end"},
-		"D_streaming": {"yolo_preprocess_dali_streaming", "yolov11_small_trt_end2end_streaming", "yolov11_small_gpu_e2e_streaming"},
-		"D_balanced":  {"yolo_preprocess_dali", "yolov11_small_trt_end2end", "yolov11_small_gpu_e2e"},
-		"D_batch":     {"yolo_preprocess_dali_batch", "yolov11_small_trt_end2end_batch", "yolov11_small_gpu_e2e_batch"},
-		"E":           {"yolo_clip_preprocess_dali", "yolov11_small_trt_end2end", "mobileclip", "yolo_clip_ensemble"},
-		"E_full":      {"yolo_clip_preprocess_dali", "yolov11_small_trt_end2end", "mobileclip", "box_embedding", "yolo_mobileclip_ensemble"},
+		"A":              {}, // PyTorch - no Triton models
+		"B":              {"yolov11_small_trt"},
+		"C":              {"yolov11_small_trt_end2end"},
+		"D_streaming":    {"yolo_preprocess_dali_streaming", "yolov11_small_trt_end2end_streaming", "yolov11_small_gpu_e2e_streaming"},
+		"D_balanced":     {"yolo_preprocess_dali", "yolov11_small_trt_end2end", "yolov11_small_gpu_e2e"},
+		"D_batch":        {"yolo_preprocess_dali_batch", "yolov11_small_trt_end2end_batch", "yolov11_small_gpu_e2e_batch"},
+		"E":              {"yolo_clip_preprocess_dali", "yolov11_small_trt_end2end", "mobileclip", "yolo_clip_ensemble"},
+		"E_full":         {"yolo_clip_preprocess_dali", "yolov11_small_trt_end2end", "mobileclip", "box_embedding", "yolo_mobileclip_ensemble"},
+		"E_faces":        {"quad_preprocess_dali", "scrfd", "arcface", "face_pipeline"},
+		"E_faces_detect": {"quad_preprocess_dali", "scrfd", "face_pipeline"},
+		"E_quad":         {"quad_preprocess_dali", "yolov11_small_trt_end2end", "mobileclip", "scrfd", "arcface", "face_pipeline", "yolo_face_clip_ensemble"},
 	}
 
 	// Get prefixes for the current track

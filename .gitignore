@@ -58,6 +58,9 @@ locust_*.csv
 # Clustering test output (mosaics, visualizations)
 cluster_test_output/
 
+# Pipeline output (mosaics, clusters, visualizations)
+outputs/
+
 # FAISS index files (generated during training)
 faiss_indexes/
 

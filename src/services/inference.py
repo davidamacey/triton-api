@@ -505,6 +505,170 @@ class InferenceService:
         return embedding
 
     # =========================================================================
+    # Track E Faces: SCRFD + ArcFace Pipeline
+    # =========================================================================
+    def infer_faces(self, image_bytes: bytes) -> dict[str, Any]:
+        """
+        Face detection and recognition pipeline (SCRFD + ArcFace).
+
+        100% GPU pipeline via DALI preprocessing:
+        1. GPU JPEG decode (nvJPEG via DALI)
+        2. Quad-branch preprocessing (SCRFD 640, HD original)
+        3. SCRFD face detection + NMS
+        4. Face alignment + ArcFace embedding extraction
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+
+        Returns:
+            Dict with face detections, landmarks, and ArcFace embeddings
+        """
+        client = get_triton_client(self.settings.triton_url)
+        result = client.infer_faces_only(image_bytes)
+
+        orig_h, orig_w = result['orig_shape']
+
+        # Format face detections
+        # Note: face_pipeline already returns boxes normalized to [0,1]
+        # and landmarks in pixel coordinates (need normalization)
+        faces = []
+        for i in range(result['num_faces']):
+            box = result['face_boxes'][i]
+            landmarks = result['face_landmarks'][i]
+            score = float(result['face_scores'][i])
+            quality = float(result['face_quality'][i]) if len(result['face_quality']) > i else None
+
+            # Box is already normalized from face_pipeline
+            norm_box = [float(x) for x in box]
+
+            # Landmarks are in pixel coordinates - normalize to [0,1]
+            norm_landmarks = []
+            for j in range(0, 10, 2):
+                norm_landmarks.append(float(landmarks[j]) / orig_w)
+                norm_landmarks.append(float(landmarks[j + 1]) / orig_h)
+
+            faces.append(
+                {
+                    'box': norm_box,
+                    'landmarks': norm_landmarks,
+                    'score': score,
+                    'quality': quality,
+                }
+            )
+
+        # Format embeddings
+        embeddings = []
+        if result['num_faces'] > 0 and len(result['face_embeddings']) > 0:
+            embeddings = result['face_embeddings'].tolist()
+
+        return {
+            'num_faces': result['num_faces'],
+            'faces': faces,
+            'embeddings': embeddings,
+            'orig_shape': (orig_h, orig_w),
+        }
+
+    def infer_faces_full(self, image_bytes: bytes) -> dict[str, Any]:
+        """
+        Full unified pipeline: YOLO + SCRFD + MobileCLIP + ArcFace.
+
+        All processing happens in Triton via quad-branch ensemble:
+        1. GPU JPEG decode (nvJPEG via DALI)
+        2. Quad-branch preprocessing (YOLO 640, CLIP 256, SCRFD 640, HD original)
+        3. YOLO object detection (parallel with 4, 5)
+        4. MobileCLIP global embedding (parallel with 3, 5)
+        5. SCRFD face detection + NMS (parallel with 3, 4)
+        6. ArcFace face embeddings (depends on 5)
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+
+        Returns:
+            Dict with YOLO detections, faces, and all embeddings
+        """
+        client = get_triton_client(self.settings.triton_url)
+        result = client.infer_faces_full(image_bytes)
+
+        # Format YOLO detections
+        detections = client.format_detections(result)
+
+        orig_h, orig_w = result['orig_shape']
+
+        # Format face detections
+        # Note: face_pipeline already returns boxes normalized to [0,1]
+        # and landmarks in pixel coordinates (need normalization)
+        faces = []
+        for i in range(result['num_faces']):
+            box = result['face_boxes'][i]
+            landmarks = result['face_landmarks'][i]
+            score = float(result['face_scores'][i])
+            quality = float(result['face_quality'][i]) if len(result['face_quality']) > i else None
+
+            # Box is already normalized from face_pipeline
+            norm_box = [float(x) for x in box]
+
+            # Landmarks are in pixel coordinates - normalize to [0,1]
+            norm_landmarks = []
+            for j in range(0, 10, 2):
+                norm_landmarks.append(float(landmarks[j]) / orig_w)
+                norm_landmarks.append(float(landmarks[j + 1]) / orig_h)
+
+            faces.append(
+                {
+                    'box': norm_box,
+                    'landmarks': norm_landmarks,
+                    'score': score,
+                    'quality': quality,
+                }
+            )
+
+        # Format face embeddings
+        face_embeddings = []
+        if result['num_faces'] > 0 and len(result['face_embeddings']) > 0:
+            face_embeddings = result['face_embeddings'].tolist()
+
+        return {
+            # YOLO detections
+            'detections': detections,
+            'num_detections': len(detections),
+            # Face detections and embeddings
+            'num_faces': result['num_faces'],
+            'faces': faces,
+            'face_embeddings': face_embeddings,
+            # Global embedding
+            'image_embedding': result['image_embedding'],
+            'embedding_norm': float(np.linalg.norm(result['image_embedding'])),
+            # Image metadata
+            'orig_shape': (orig_h, orig_w),
+        }
+
+    def infer_unified(self, image_bytes: bytes) -> dict[str, Any]:
+        """
+        Unified pipeline: YOLO + MobileCLIP + person-only face detection.
+
+        More efficient than infer_faces_full - runs SCRFD only on person
+        bounding box crops instead of full 640x640 image.
+
+        Pipeline:
+        1. GPU JPEG decode (nvJPEG via DALI)
+        2. Triple preprocessing (YOLO 640, CLIP 256, HD original)
+        3. YOLO object detection (parallel with 4)
+        4. MobileCLIP global embedding (parallel with 3)
+        5. Unified extraction (after 2, 3):
+           - MobileCLIP per-box embeddings (all boxes)
+           - SCRFD face detection (person boxes only)
+           - ArcFace face embeddings
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+
+        Returns:
+            Dict with YOLO detections, embeddings, and face data
+        """
+        client = get_triton_client(self.settings.triton_url)
+        return client.infer_unified(image_bytes)
+
+    # =========================================================================
     # Model Resolution Helpers
     # =========================================================================
     def resolve_model_name(self, model_name: str) -> tuple[str, str, bool]:

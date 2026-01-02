@@ -1,0 +1,229 @@
+# Track E: Unified YOLO + Face + CLIP Visual Search Ensemble
+#
+# Complete GPU pipeline for visual search with face recognition:
+# - All processing happens in Triton - API sends JPEG once, receives all outputs
+# - No round-trips between API and Triton
+#
+# Pipeline Flow:
+#   JPEG bytes
+#       |
+#       v
+#   DALI Quad Preprocess (single GPU decode)
+#       |
+#   +---+---+-------+-------+
+#   |   |   |       |
+#   v   v   v       v
+# YOLO CLIP SCRFD  HD Original
+# 640  256  640    max 1920px
+#   |   |   |       |
+#   v   v   +-------+-------+
+# det  emb    face_pipeline
+#   |   |     (SCRFD + Align + ArcFace)
+#   |   |           |
+#   v   v           v
+# dets global    faces + embeddings
+#
+# Outputs:
+#   - YOLO detections (num_dets, det_boxes, det_scores, det_classes)
+#   - Global MobileCLIP embedding (512-dim)
+#   - Face detections (num_faces, face_boxes, face_landmarks, face_scores)
+#   - Face ArcFace embeddings (128 x 512-dim)
+
+name: "yolo_face_clip_ensemble"
+platform: "ensemble"
+max_batch_size: 64
+
+input [
+  {
+    name: "encoded_images"
+    data_type: TYPE_UINT8
+    dims: [ -1 ]
+  },
+  {
+    name: "affine_matrices"
+    data_type: TYPE_FP32
+    dims: [ 2, 3 ]
+  },
+  {
+    name: "orig_shape"
+    data_type: TYPE_INT32
+    dims: [ 2 ]
+  }
+]
+
+output [
+  # YOLO detections
+  {
+    name: "num_dets"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "det_boxes"
+    data_type: TYPE_FP32
+    dims: [ 300, 4 ]
+  },
+  {
+    name: "det_scores"
+    data_type: TYPE_FP32
+    dims: [ 300 ]
+  },
+  {
+    name: "det_classes"
+    data_type: TYPE_INT32
+    dims: [ 300 ]
+  },
+  # MobileCLIP embeddings
+  {
+    name: "global_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 512 ]
+  },
+  # Face detections and embeddings
+  {
+    name: "num_faces"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "face_boxes"
+    data_type: TYPE_FP32
+    dims: [ 128, 4 ]
+  },
+  {
+    name: "face_landmarks"
+    data_type: TYPE_FP32
+    dims: [ 128, 10 ]
+  },
+  {
+    name: "face_scores"
+    data_type: TYPE_FP32
+    dims: [ 128 ]
+  },
+  {
+    name: "face_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 128, 512 ]
+  },
+  {
+    name: "face_quality"
+    data_type: TYPE_FP32
+    dims: [ 128 ]
+  }
+]
+
+ensemble_scheduling {
+  step [
+    # Step 1: Quad-branch DALI preprocessing (single GPU decode)
+    {
+      model_name: "quad_preprocess_dali"
+      model_version: -1
+      input_map {
+        key: "encoded_images"
+        value: "encoded_images"
+      }
+      input_map {
+        key: "affine_matrices"
+        value: "affine_matrices"
+      }
+      output_map {
+        key: "yolo_images"
+        value: "_yolo_images"
+      }
+      output_map {
+        key: "clip_images"
+        value: "_clip_images"
+      }
+      output_map {
+        key: "face_images"
+        value: "_face_images"
+      }
+      output_map {
+        key: "original_images"
+        value: "_original_images"
+      }
+    },
+
+    # Step 2a: YOLO object detection (runs in parallel with 2b, 2c)
+    {
+      model_name: "yolov11_small_trt_end2end"
+      model_version: -1
+      input_map {
+        key: "images"
+        value: "_yolo_images"
+      }
+      output_map {
+        key: "num_dets"
+        value: "num_dets"
+      }
+      output_map {
+        key: "det_boxes"
+        value: "det_boxes"
+      }
+      output_map {
+        key: "det_scores"
+        value: "det_scores"
+      }
+      output_map {
+        key: "det_classes"
+        value: "det_classes"
+      }
+    },
+
+    # Step 2b: MobileCLIP global embedding (runs in parallel with 2a, 2c)
+    {
+      model_name: "mobileclip2_s2_image_encoder"
+      model_version: -1
+      input_map {
+        key: "images"
+        value: "_clip_images"
+      }
+      output_map {
+        key: "image_embeddings"
+        value: "global_embeddings"
+      }
+    },
+
+    # Step 2c: Face pipeline (SCRFD + Align + ArcFace) - runs in parallel with 2a, 2b
+    {
+      model_name: "face_pipeline"
+      model_version: -1
+      input_map {
+        key: "face_images"
+        value: "_face_images"
+      }
+      input_map {
+        key: "original_image"
+        value: "_original_images"
+      }
+      input_map {
+        key: "orig_shape"
+        value: "orig_shape"
+      }
+      output_map {
+        key: "num_faces"
+        value: "num_faces"
+      }
+      output_map {
+        key: "face_boxes"
+        value: "face_boxes"
+      }
+      output_map {
+        key: "face_landmarks"
+        value: "face_landmarks"
+      }
+      output_map {
+        key: "face_scores"
+        value: "face_scores"
+      }
+      output_map {
+        key: "face_embeddings"
+        value: "face_embeddings"
+      }
+      output_map {
+        key: "face_quality"
+        value: "face_quality"
+      }
+    }
+  ]
+}

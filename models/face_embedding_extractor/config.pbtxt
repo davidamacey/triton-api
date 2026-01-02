@@ -1,0 +1,91 @@
+# Track E: Face Embedding Extractor (Python Backend)
+#
+# Aligns detected faces using landmarks and extracts ArcFace embeddings via BLS.
+# Uses industry-standard Umeyama algorithm (InsightFace, DeepFace, FaceNet).
+#
+# Strategy: Landmark-based face alignment
+#   - Receives original decoded image at native resolution from DALI
+#   - Uses 5-point facial landmarks from SCRFD for alignment
+#   - Applies Umeyama similarity transform to align faces to 112x112
+#   - Preprocesses for ArcFace: (x - 127.5) / 128.0
+#   - Calls arcface_w600k_r50 via BLS for 512-dim embeddings
+#   - L2-normalizes embeddings for cosine similarity
+#
+# Inputs:
+#   - original_image: [3, H, W] Native-resolution decoded image
+#   - face_boxes: [128, 4] SCRFD detections [x1, y1, x2, y2] pixel coords
+#   - face_landmarks: [128, 10] 5-point landmarks (x1,y1,x2,y2,...,x5,y5)
+#   - num_faces: [1] Number of valid face detections
+#
+# Outputs:
+#   - face_embeddings: [128, 512] L2-normalized ArcFace embeddings (zero-padded)
+#   - aligned_boxes: [128, 4] Normalized face boxes [0, 1] range
+#   - face_quality: [128] Quality scores (size, symmetry, boundary)
+
+name: "face_embedding_extractor"
+backend: "python"
+max_batch_size: 64
+
+input [
+  {
+    name: "original_image"
+    data_type: TYPE_FP32
+    dims: [3, -1, -1]  # Variable height and width
+  },
+  {
+    name: "face_boxes"
+    data_type: TYPE_FP32
+    dims: [128, 4]  # XYXY format: [x1, y1, x2, y2] in pixel coords
+  },
+  {
+    name: "face_landmarks"
+    data_type: TYPE_FP32
+    dims: [128, 10]  # 5 landmarks × 2 coords (x,y for each point)
+  },
+  {
+    name: "num_faces"
+    data_type: TYPE_INT32
+    dims: [1]
+  }
+]
+
+output [
+  {
+    name: "face_embeddings"
+    data_type: TYPE_FP32
+    dims: [128, 512]  # L2-normalized ArcFace embeddings (512-dim)
+  },
+  {
+    name: "aligned_boxes"
+    data_type: TYPE_FP32
+    dims: [128, 4]  # Normalized face boxes [0, 1] range
+  },
+  {
+    name: "face_quality"
+    data_type: TYPE_FP32
+    dims: [128]  # Quality score per face (0-1)
+  }
+]
+
+# Instance configuration
+# Using 4 instances for parallelism (BLS calls to ArcFace can overlap)
+instance_group [
+  {
+    count: 4
+    kind: KIND_GPU
+    gpus: [0]
+  }
+]
+
+# Dynamic batching with graceful failure under load
+dynamic_batching {
+  preferred_batch_size: [ 1, 2, 4 ]
+  max_queue_delay_microseconds: 5000  # 5ms
+
+  default_queue_policy {
+    timeout_action: REJECT
+    default_timeout_microseconds: 5000000  # 5 seconds
+    allow_timeout_override: false
+    max_queue_size: 128
+  }
+}

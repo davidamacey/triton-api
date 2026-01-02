@@ -32,6 +32,10 @@ from src.core.dependencies import VisualSearchDep
 from src.schemas.detection import ImageMetadata, ModelMetadata
 from src.schemas.track_e import (
     DetectOnlyResponse,
+    FaceDetection,
+    FaceDetectResponse,
+    FaceFullResponse,
+    FaceRecognizeResponse,
     ImageEmbeddingResponse,
     PredictFullResponse,
     PredictResponse,
@@ -1115,3 +1119,345 @@ def clear_caches():
     except Exception as e:
         logger.error(f'Failed to clear caches: {e}')
         raise HTTPException(500, f'Failed to clear caches: {e!s}') from e
+
+
+# =============================================================================
+# Face Detection & Recognition Endpoints (SYNC - GPU Pipeline)
+# =============================================================================
+
+
+@router.post('/faces/detect', response_model=FaceDetectResponse, tags=['Track E: Face Recognition'])
+def detect_faces(
+    image: UploadFile = File(..., description='Image file (JPEG/PNG)'),
+):
+    """
+    Detect faces in image using SCRFD-10G.
+
+    100% GPU pipeline via DALI preprocessing:
+    1. GPU JPEG decode (nvJPEG via DALI)
+    2. GPU preprocessing for SCRFD (640x640)
+    3. SCRFD face detection with GPU NMS
+    4. Returns face boxes, 5-point landmarks, and confidence scores
+
+    Response includes normalized [0,1] coordinates for boxes and landmarks.
+    """
+    try:
+        image_bytes = image.file.read()
+        inference_service = InferenceService()
+
+        result = inference_service.infer_faces(image_bytes)
+        orig_h, orig_w = result['orig_shape']
+
+        faces = [
+            FaceDetection(
+                box=f['box'],
+                landmarks=f['landmarks'],
+                score=f['score'],
+                quality=f.get('quality'),
+            )
+            for f in result['faces']
+        ]
+
+        return FaceDetectResponse(
+            num_faces=result['num_faces'],
+            faces=faces,
+            image=ImageMetadata(width=orig_w, height=orig_h),
+        )
+
+    except Exception as e:
+        logger.error(f'Face detection failed: {e}')
+        raise HTTPException(500, f'Face detection failed: {e!s}') from e
+
+
+@router.post(
+    '/faces/recognize', response_model=FaceRecognizeResponse, tags=['Track E: Face Recognition']
+)
+def recognize_faces(
+    image: UploadFile = File(..., description='Image file (JPEG/PNG)'),
+):
+    """
+    Detect faces and extract ArcFace identity embeddings.
+
+    100% GPU pipeline:
+    1. GPU JPEG decode (nvJPEG via DALI)
+    2. SCRFD face detection + NMS
+    3. Face alignment using landmarks (Umeyama transform)
+    4. ArcFace embedding extraction (512-dim L2-normalized)
+
+    Use embeddings for:
+    - Face verification (1:1 matching) - cosine similarity > 0.6
+    - Face identification (1:N search) - OpenSearch k-NN
+
+    Response includes normalized [0,1] coordinates and 512-dim embeddings per face.
+    """
+    try:
+        image_bytes = image.file.read()
+        inference_service = InferenceService()
+
+        result = inference_service.infer_faces(image_bytes)
+        orig_h, orig_w = result['orig_shape']
+
+        faces = [
+            FaceDetection(
+                box=f['box'],
+                landmarks=f['landmarks'],
+                score=f['score'],
+                quality=f.get('quality'),
+            )
+            for f in result['faces']
+        ]
+
+        return FaceRecognizeResponse(
+            num_faces=result['num_faces'],
+            faces=faces,
+            embeddings=result['embeddings'],
+            image=ImageMetadata(width=orig_w, height=orig_h),
+        )
+
+    except Exception as e:
+        logger.error(f'Face recognition failed: {e}')
+        raise HTTPException(500, f'Face recognition failed: {e!s}') from e
+
+
+@router.post('/faces/full', response_model=FaceFullResponse, tags=['Track E: Face Recognition'])
+def predict_faces_full(
+    image: UploadFile = File(..., description='Image file (JPEG/PNG)'),
+):
+    """
+    Unified pipeline: YOLO + SCRFD + MobileCLIP + ArcFace.
+
+    All processing happens in Triton via quad-branch ensemble:
+    1. GPU JPEG decode (nvJPEG via DALI)
+    2. Quad-branch preprocessing (YOLO 640, CLIP 256, SCRFD 640, HD original)
+    3. YOLO object detection (parallel with 4, 5)
+    4. MobileCLIP global embedding (parallel with 3, 5)
+    5. SCRFD face detection + NMS (parallel with 3, 4)
+    6. ArcFace face embeddings (depends on 5)
+
+    Returns:
+    - YOLO detections (objects in image)
+    - Face detections with landmarks
+    - ArcFace 512-dim embeddings per face
+    - MobileCLIP 512-dim global image embedding
+    """
+    try:
+        image_bytes = image.file.read()
+        inference_service = InferenceService()
+
+        result = inference_service.infer_faces_full(image_bytes)
+        orig_h, orig_w = result['orig_shape']
+
+        faces = [
+            FaceDetection(
+                box=f['box'],
+                landmarks=f['landmarks'],
+                score=f['score'],
+                quality=f.get('quality'),
+            )
+            for f in result['faces']
+        ]
+
+        return FaceFullResponse(
+            detections=result['detections'],
+            num_detections=result['num_detections'],
+            num_faces=result['num_faces'],
+            faces=faces,
+            face_embeddings=result['face_embeddings'],
+            embedding_norm=result['embedding_norm'],
+            image=ImageMetadata(width=orig_w, height=orig_h),
+            model=ModelMetadata(
+                name='yolo_face_clip_ensemble',
+                backend='triton',
+                device='gpu',
+            ),
+        )
+
+    except Exception as e:
+        logger.error(f'Full face pipeline failed: {e}')
+        raise HTTPException(500, f'Full face pipeline failed: {e!s}') from e
+
+
+@router.post('/faces/verify', tags=['Track E: Face Recognition'])
+def verify_faces(
+    image1: UploadFile = File(..., description='First image with face'),
+    image2: UploadFile = File(..., description='Second image with face'),
+    threshold: float = Query(0.6, ge=0.0, le=1.0, description='Similarity threshold for match'),
+):
+    """
+    Verify if two images contain the same person (1:1 verification).
+
+    Extracts ArcFace embeddings from both images and compares using cosine similarity.
+
+    Threshold guidelines:
+    - 0.6: High confidence (recommended for security)
+    - 0.5: Balanced precision/recall
+    - 0.4: More permissive (may have false positives)
+
+    Returns match decision, similarity score, and face info from both images.
+    """
+    try:
+        image1_bytes = image1.file.read()
+        image2_bytes = image2.file.read()
+        inference_service = InferenceService()
+
+        result1 = inference_service.infer_faces(image1_bytes)
+        result2 = inference_service.infer_faces(image2_bytes)
+
+        if result1['num_faces'] == 0:
+            raise HTTPException(400, 'No face detected in first image')
+        if result2['num_faces'] == 0:
+            raise HTTPException(400, 'No face detected in second image')
+
+        # Use first face from each image
+        emb1 = np.array(result1['embeddings'][0])
+        emb2 = np.array(result2['embeddings'][0])
+
+        # Cosine similarity (embeddings are L2-normalized)
+        similarity = float(np.dot(emb1, emb2))
+        is_match = similarity >= threshold
+
+        return {
+            'status': 'success',
+            'match': is_match,
+            'similarity': round(similarity, 4),
+            'threshold': threshold,
+            'image1': {
+                'num_faces': result1['num_faces'],
+                'face_used': result1['faces'][0],
+            },
+            'image2': {
+                'num_faces': result2['num_faces'],
+                'face_used': result2['faces'][0],
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Face verification failed: {e}')
+        raise HTTPException(500, f'Face verification failed: {e!s}') from e
+
+
+@router.post('/faces/ingest', tags=['Track E: Face Recognition'])
+async def ingest_faces(
+    search_service: VisualSearchDep,
+    image: UploadFile = File(..., description='Image file (JPEG/PNG)'),
+    image_id: str | None = Query(
+        None, description='Unique identifier (auto-generated if not provided)'
+    ),
+    image_path: str | None = Query(None, description='File path for retrieval'),
+    person_name: str | None = Query(None, description='Optional name/label for faces'),
+):
+    """
+    Ingest faces from image into face identity database.
+
+    Pipeline:
+    1. Run SCRFD face detection
+    2. Extract ArcFace embeddings for each face
+    3. Index to visual_search_faces
+
+    Args:
+        image: Image file (JPEG/PNG)
+        image_id: Unique identifier (auto-generated if not provided)
+        image_path: File path for retrieval (defaults to image_id)
+        person_name: Optional name/label for all faces in image
+
+    Returns:
+        Ingestion result with face count
+    """
+    try:
+        if not image.content_type or not image.content_type.startswith('image/'):
+            raise HTTPException(400, 'File must be an image')
+
+        image_bytes = image.file.read()
+
+        if image_id is None:
+            image_id = f'img_{uuid.uuid4().hex[:12]}'
+
+        result = await search_service.ingest_faces(
+            image_bytes=image_bytes,
+            image_id=image_id,
+            image_path=image_path,
+            person_name=person_name,
+        )
+
+        if result['status'] == 'error':
+            raise HTTPException(500, result.get('error', 'Face ingestion failed'))
+
+        return {
+            'status': 'success',
+            'image_id': image_id,
+            'num_faces': result['num_faces'],
+            'indexed': result['indexed'],
+            'message': f'Indexed {result["indexed"]} faces',
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Face ingestion failed: {e}')
+        raise HTTPException(500, f'Face ingestion failed: {e!s}') from e
+
+
+@router.post('/unified', tags=['Track E: Unified Pipeline'])
+def predict_unified(
+    image: UploadFile = File(..., description='Image file (JPEG/PNG)'),
+):
+    """
+    Unified pipeline: YOLO + MobileCLIP + person-only face detection.
+
+    **More efficient than /faces/full** - runs SCRFD only on person bounding
+    box crops instead of full image. Returns:
+
+    - YOLO object detections (all classes)
+    - Global MobileCLIP embedding (512-dim)
+    - Per-box MobileCLIP embeddings
+    - Face detections ONLY from person crops
+    - Face ArcFace embeddings (512-dim)
+    - Which person box each face belongs to
+
+    Benefits:
+    - ~2x faster than full-image face detection
+    - Fewer false positives (faces only from person regions)
+    - Face-to-person association included
+    """
+    try:
+        image_bytes = image.file.read()
+        inference_service = InferenceService()
+
+        result = inference_service.infer_unified(image_bytes)
+
+        return {
+            'status': 'success',
+            'num_detections': result['num_dets'],
+            'detections': [
+                {
+                    'box': result['normalized_boxes'][i].tolist(),
+                    'score': float(result['scores'][i]),
+                    'class_id': int(result['classes'][i]),
+                }
+                for i in range(result['num_dets'])
+            ],
+            'global_embedding_norm': float(np.linalg.norm(result['global_embedding'])),
+            'num_faces': result['num_faces'],
+            'faces': [
+                {
+                    'box': result['face_boxes'][i].tolist(),
+                    'landmarks': result['face_landmarks'][i].tolist(),
+                    'score': float(result['face_scores'][i]),
+                    'person_idx': int(result['face_person_idx'][i]),
+                }
+                for i in range(result['num_faces'])
+            ],
+            'image': {
+                'width': result['orig_shape'][1],
+                'height': result['orig_shape'][0],
+            },
+            'track': 'E_unified',
+            'preprocessing': 'gpu_dali',
+            'pipeline': 'person_only_face_detection',
+        }
+
+    except Exception as e:
+        logger.error(f'Unified pipeline failed: {e}')
+        raise HTTPException(500, f'Unified pipeline failed: {e!s}') from e

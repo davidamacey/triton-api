@@ -31,6 +31,10 @@ YOLO_PAD_VALUE: int = 114  # Gray padding (YOLO standard)
 # MobileCLIP preprocessing
 CLIP_SIZE: int = 256
 
+# SCRFD face detection preprocessing
+SCRFD_SIZE: int = 640  # SCRFD uses 640x640 (resized, not letterboxed)
+ARCFACE_SIZE: int = 112  # ArcFace aligned face size
+
 # HD cropping (Track E full only)
 CROP_IMAGE_MAX_SIZE: int = 1920  # Max pixels on longest edge
 
@@ -66,6 +70,7 @@ TRACK_D_DALI_MODELS: dict[str, str] = {
 # Track E: YOLO + CLIP preprocessing
 TRACK_E_DUAL_DALI_MODEL: str = 'dual_preprocess_dali'  # Triple-branch (YOLO + CLIP + HD)
 TRACK_E_SIMPLE_DALI_MODEL: str = 'yolo_clip_preprocess_dali'  # Dual-branch (YOLO + CLIP)
+TRACK_E_QUAD_DALI_MODEL: str = 'quad_preprocess_dali'  # Quad-branch (YOLO + CLIP + SCRFD + HD)
 
 # Default paths
 DEFAULT_MODEL_DIR: Path = Path(os.getenv('TRITON_MODEL_REPO', '/app/models'))
@@ -79,10 +84,11 @@ DEFAULT_TEST_IMAGE: Path = Path('/app/test_images/bus.jpg')
 # Track D outputs
 TRACK_D_OUTPUT_PREPROCESSED: str = 'preprocessed_images'
 
-# Track E outputs (dual/triple-branch)
+# Track E outputs (dual/triple/quad-branch)
 TRACK_E_OUTPUT_YOLO: str = 'yolo_images'
 TRACK_E_OUTPUT_CLIP: str = 'clip_images'
-TRACK_E_OUTPUT_ORIGINAL: str = 'original_images'  # Only in triple-branch
+TRACK_E_OUTPUT_ORIGINAL: str = 'original_images'  # Only in triple/quad-branch
+TRACK_E_OUTPUT_FACE: str = 'face_images'  # Only in quad-branch (SCRFD)
 
 # Detection outputs (from TRT End2End)
 OUTPUT_NUM_DETS: str = 'num_dets'

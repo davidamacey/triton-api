@@ -8,10 +8,12 @@ Used to ensure requests are processed even under high load.
 import asyncio
 import logging
 import random
+from collections.abc import Callable
 from functools import wraps
-from typing import Callable, TypeVar
+from typing import TypeVar
 
 import grpc
+
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +21,10 @@ T = TypeVar('T')
 
 # Triton gRPC error codes that are retryable
 RETRYABLE_GRPC_CODES = {
-    grpc.StatusCode.UNAVAILABLE,      # Server overloaded
+    grpc.StatusCode.UNAVAILABLE,  # Server overloaded
     grpc.StatusCode.RESOURCE_EXHAUSTED,  # Queue full
-    grpc.StatusCode.DEADLINE_EXCEEDED,   # Timeout
-    grpc.StatusCode.ABORTED,          # Request aborted
+    grpc.StatusCode.DEADLINE_EXCEEDED,  # Timeout
+    grpc.StatusCode.ABORTED,  # Request aborted
 }
 
 
@@ -62,7 +64,7 @@ def is_retryable_error(error: Exception) -> bool:
     return any(pattern in error_str for pattern in retryable_patterns)
 
 
-async def retry_async(
+async def retry_async[T](
     func: Callable[..., T],
     *args,
     max_retries: int = 3,
@@ -108,15 +110,13 @@ async def retry_async(
                 break
 
             # Calculate delay with exponential backoff
-            delay = min(base_delay * (exponential_base ** attempt), max_delay)
+            delay = min(base_delay * (exponential_base**attempt), max_delay)
 
             # Add jitter to prevent thundering herd
             jitter_amount = delay * jitter * random.random()
             delay += jitter_amount
 
-            logger.warning(
-                f'Retry {attempt + 1}/{max_retries} after {delay:.2f}s: {e}'
-            )
+            logger.warning(f'Retry {attempt + 1}/{max_retries} after {delay:.2f}s: {e}')
 
             await asyncio.sleep(delay)
 
@@ -126,7 +126,7 @@ async def retry_async(
     )
 
 
-def retry_sync(
+def retry_sync[T](
     func: Callable[..., T],
     *args,
     max_retries: int = 3,
@@ -157,13 +157,11 @@ def retry_sync(
             if attempt == max_retries:
                 break
 
-            delay = min(base_delay * (exponential_base ** attempt), max_delay)
+            delay = min(base_delay * (exponential_base**attempt), max_delay)
             jitter_amount = delay * jitter * random.random()
             delay += jitter_amount
 
-            logger.warning(
-                f'Retry {attempt + 1}/{max_retries} after {delay:.2f}s: {e}'
-            )
+            logger.warning(f'Retry {attempt + 1}/{max_retries} after {delay:.2f}s: {e}')
 
             time.sleep(delay)
 
@@ -186,15 +184,19 @@ def with_retry(
         async def my_inference_function():
             ...
     """
+
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
         @wraps(func)
         async def wrapper(*args, **kwargs) -> T:
             return await retry_async(
-                func, *args,
+                func,
+                *args,
                 max_retries=max_retries,
                 base_delay=base_delay,
                 max_delay=max_delay,
                 **kwargs,
             )
+
         return wrapper
+
     return decorator

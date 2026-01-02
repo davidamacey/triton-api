@@ -1,0 +1,236 @@
+# Track E: Unified YOLO + MobileCLIP + Face Detection Ensemble
+#
+# Efficient GPU pipeline combining object detection, embeddings, AND face recognition:
+# 1. DALI: Decode + triple preprocessing (YOLO 640×640, CLIP 256×256, Original HD)
+# 2. YOLO: Object detection with GPU NMS (parallel with step 3)
+# 3. MobileCLIP: Global image embedding (parallel with step 2)
+# 4. Unified Extractor: Per-box embeddings + person-only face detection
+#
+# Key Optimization:
+# - Face detection runs ONLY on person bounding boxes (class_id=0)
+# - Much more efficient than full-image SCRFD detection
+# - Faces are guaranteed to be within detected persons
+#
+# Input: Raw JPEG bytes + affine matrix
+# Outputs: YOLO detections + box embeddings + face embeddings
+
+name: "yolo_unified_ensemble"
+platform: "ensemble"
+max_batch_size: 64
+
+input [
+  {
+    name: "encoded_images"
+    data_type: TYPE_UINT8
+    dims: [ -1 ]
+  },
+  {
+    name: "affine_matrices"
+    data_type: TYPE_FP32
+    dims: [ 2, 3 ]
+  }
+]
+
+output [
+  # YOLO detections
+  {
+    name: "num_dets"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "det_boxes"
+    data_type: TYPE_FP32
+    dims: [ 300, 4 ]
+  },
+  {
+    name: "det_scores"
+    data_type: TYPE_FP32
+    dims: [ 300 ]
+  },
+  {
+    name: "det_classes"
+    data_type: TYPE_INT32
+    dims: [ 300 ]
+  },
+  # MobileCLIP embeddings
+  {
+    name: "global_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 512 ]
+  },
+  {
+    name: "box_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 300, 512 ]
+  },
+  {
+    name: "normalized_boxes"
+    data_type: TYPE_FP32
+    dims: [ 300, 4 ]
+  },
+  # Face detection outputs
+  {
+    name: "num_faces"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "face_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 64, 512 ]
+  },
+  {
+    name: "face_boxes"
+    data_type: TYPE_FP32
+    dims: [ 64, 4 ]
+  },
+  {
+    name: "face_landmarks"
+    data_type: TYPE_FP32
+    dims: [ 64, 10 ]
+  },
+  {
+    name: "face_scores"
+    data_type: TYPE_FP32
+    dims: [ 64 ]
+  },
+  {
+    name: "face_person_idx"
+    data_type: TYPE_INT32
+    dims: [ 64 ]
+  }
+]
+
+ensemble_scheduling {
+  step [
+    # Step 1: Triple-branch DALI preprocessing
+    {
+      model_name: "dual_preprocess_dali"
+      model_version: -1
+      input_map {
+        key: "encoded_images"
+        value: "encoded_images"
+      }
+      input_map {
+        key: "affine_matrices"
+        value: "affine_matrices"
+      }
+      output_map {
+        key: "yolo_images"
+        value: "_yolo_images"
+      }
+      output_map {
+        key: "clip_images"
+        value: "_clip_images"
+      }
+      output_map {
+        key: "original_images"
+        value: "_original_images"
+      }
+    },
+
+    # Step 2: YOLO detection (parallel with Step 3)
+    {
+      model_name: "yolov11_small_trt_end2end"
+      model_version: -1
+      input_map {
+        key: "images"
+        value: "_yolo_images"
+      }
+      output_map {
+        key: "num_dets"
+        value: "num_dets"
+      }
+      output_map {
+        key: "det_boxes"
+        value: "det_boxes"
+      }
+      output_map {
+        key: "det_scores"
+        value: "det_scores"
+      }
+      output_map {
+        key: "det_classes"
+        value: "det_classes"
+      }
+    },
+
+    # Step 3: Global image embedding (parallel with Step 2)
+    {
+      model_name: "mobileclip2_s2_image_encoder"
+      model_version: -1
+      input_map {
+        key: "images"
+        value: "_clip_images"
+      }
+      output_map {
+        key: "image_embeddings"
+        value: "global_embeddings"
+      }
+    },
+
+    # Step 4: Unified embedding extractor (box + face)
+    # Runs MobileCLIP on all boxes, SCRFD+ArcFace on person boxes only
+    {
+      model_name: "unified_embedding_extractor"
+      model_version: -1
+      input_map {
+        key: "original_image"
+        value: "_original_images"
+      }
+      input_map {
+        key: "det_boxes"
+        value: "det_boxes"
+      }
+      input_map {
+        key: "det_classes"
+        value: "det_classes"
+      }
+      input_map {
+        key: "det_scores"
+        value: "det_scores"
+      }
+      input_map {
+        key: "num_dets"
+        value: "num_dets"
+      }
+      input_map {
+        key: "affine_matrix"
+        value: "affine_matrices"
+      }
+      output_map {
+        key: "box_embeddings"
+        value: "box_embeddings"
+      }
+      output_map {
+        key: "normalized_boxes"
+        value: "normalized_boxes"
+      }
+      output_map {
+        key: "num_faces"
+        value: "num_faces"
+      }
+      output_map {
+        key: "face_embeddings"
+        value: "face_embeddings"
+      }
+      output_map {
+        key: "face_boxes"
+        value: "face_boxes"
+      }
+      output_map {
+        key: "face_landmarks"
+        value: "face_landmarks"
+      }
+      output_map {
+        key: "face_scores"
+        value: "face_scores"
+      }
+      output_map {
+        key: "face_person_idx"
+        value: "face_person_idx"
+      }
+    }
+  ]
+}

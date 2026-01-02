@@ -1,0 +1,82 @@
+name: "scrfd_10g_face_detect"
+platform: "tensorrt_plan"
+max_batch_size: 0
+
+input {
+    name: "input.1"
+    data_type: TYPE_FP32
+    dims: [-1, 3, 640, 640]
+}
+
+# Stride 8 outputs (80x80 * 2 anchors = 12800 per batch element)
+output {
+    name: "448"
+    data_type: TYPE_FP32
+    dims: [-1, 1]
+}
+
+output {
+    name: "451"
+    data_type: TYPE_FP32
+    dims: [-1, 4]
+}
+
+output {
+    name: "454"
+    data_type: TYPE_FP32
+    dims: [-1, 10]
+}
+
+# Stride 16 outputs (40x40 * 2 anchors = 3200 per batch element)
+output {
+    name: "471"
+    data_type: TYPE_FP32
+    dims: [-1, 1]
+}
+
+output {
+    name: "474"
+    data_type: TYPE_FP32
+    dims: [-1, 4]
+}
+
+output {
+    name: "477"
+    data_type: TYPE_FP32
+    dims: [-1, 10]
+}
+
+# Stride 32 outputs (20x20 * 2 anchors = 800 per batch element)
+output {
+    name: "494"
+    data_type: TYPE_FP32
+    dims: [-1, 1]
+}
+
+output {
+    name: "497"
+    data_type: TYPE_FP32
+    dims: [-1, 4]
+}
+
+output {
+    name: "500"
+    data_type: TYPE_FP32
+    dims: [-1, 10]
+}
+
+# Note: Dynamic batching disabled due to SCRFD output structure
+# Outputs concatenate batch*anchors along first dimension
+# Use multiple instances for parallel processing instead
+
+instance_group [{
+    count: 4
+    kind: KIND_GPU
+    gpus: [0]
+}]
+
+version_policy {
+    latest {
+        num_versions: 1
+    }
+}

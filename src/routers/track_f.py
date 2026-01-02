@@ -15,7 +15,6 @@ Endpoints:
 
 import logging
 
-import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import ORJSONResponse
 

@@ -203,6 +203,15 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
     "ALL",     # Disable all linting for third-party patches
 ]
 
+# Export scripts for TensorRT plugins (third-party TRT NMS patterns)
+"export/**/*.py" = [
+    "N801",    # Class names follow TensorRT plugin conventions (TRT_EfficientNMS)
+    "ARG001",  # Unused arguments kept for interface consistency
+    "ARG004",  # TensorRT plugin forward() requires all args for ONNX export
+    "PT028",   # Default arguments in test-named functions (standalone scripts, not pytest)
+    "F401",    # Import for side effects (pycuda.autoinit, pycuda.driver)
+]
+
 [tool.ruff.lint.isort]
 # Import sorting configuration (follows black/blue style)
 force-single-line = false

@@ -1,0 +1,73 @@
+# Track E: Quad-Branch DALI Preprocessing
+# GPU-accelerated preprocessing for YOLO + MobileCLIP + SCRFD + HD Cropping
+#
+# Enables parallel object detection AND face detection in a single pass!
+#
+# Inputs:
+#   - encoded_images: JPEG/PNG bytes
+#   - affine_matrices: YOLO letterbox transformation [2, 3]
+#
+# Outputs:
+#   - yolo_images: [N, 3, 640, 640] FP32 - for YOLO object detection
+#   - clip_images: [N, 3, 256, 256] FP32 - for global MobileCLIP embedding
+#   - face_images: [N, 3, 640, 640] FP32 - for SCRFD face detection
+#   - original_images: [N, 3, H, W] FP32 - for cropping (max 1920px, no upscale)
+
+name: "quad_preprocess_dali"
+backend: "dali"
+max_batch_size: 128
+
+input [
+  {
+    name: "encoded_images"
+    data_type: TYPE_UINT8
+    dims: [ -1 ]  # Variable-length JPEG bytes
+  },
+  {
+    name: "affine_matrices"
+    data_type: TYPE_FP32
+    dims: [ 2, 3 ]  # Affine transformation matrix
+  }
+]
+
+output [
+  {
+    name: "yolo_images"
+    data_type: TYPE_FP32
+    dims: [ 3, 640, 640 ]
+  },
+  {
+    name: "clip_images"
+    data_type: TYPE_FP32
+    dims: [ 3, 256, 256 ]
+  },
+  {
+    name: "face_images"
+    data_type: TYPE_FP32
+    dims: [ 3, 640, 640 ]
+  },
+  {
+    name: "original_images"
+    data_type: TYPE_FP32
+    dims: [ 3, -1, -1 ]  # Variable dimensions [3, H, W]
+  }
+]
+
+# Increased instances for higher throughput
+instance_group [
+  {
+    count: 2
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 4, 8, 16 ]
+  max_queue_delay_microseconds: 10000
+}
+
+parameters: {
+  key: "num_threads"
+  value: { string_value: "4" }
+}

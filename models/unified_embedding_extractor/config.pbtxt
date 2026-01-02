@@ -1,0 +1,104 @@
+# Unified Embedding Extractor with Face Detection
+#
+# Combines per-box MobileCLIP embeddings with person-only face detection:
+# 1. MobileCLIP embeddings for ALL detected boxes
+# 2. SCRFD face detection ONLY on person crops (class_id=0)
+# 3. ArcFace embeddings for detected faces
+#
+# Much more efficient than full-image face detection - only processes
+# regions where persons are detected.
+
+name: "unified_embedding_extractor"
+backend: "python"
+max_batch_size: 64
+
+input [
+  {
+    name: "original_image"
+    data_type: TYPE_FP32
+    dims: [ 3, -1, -1 ]
+  },
+  {
+    name: "det_boxes"
+    data_type: TYPE_FP32
+    dims: [ 300, 4 ]
+  },
+  {
+    name: "det_classes"
+    data_type: TYPE_INT32
+    dims: [ 300 ]
+  },
+  {
+    name: "det_scores"
+    data_type: TYPE_FP32
+    dims: [ 300 ]
+  },
+  {
+    name: "num_dets"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "affine_matrix"
+    data_type: TYPE_FP32
+    dims: [ 2, 3 ]
+  }
+]
+
+output [
+  # MobileCLIP embeddings for all boxes
+  {
+    name: "box_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 300, 512 ]
+  },
+  {
+    name: "normalized_boxes"
+    data_type: TYPE_FP32
+    dims: [ 300, 4 ]
+  },
+  # Face detection outputs
+  {
+    name: "num_faces"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "face_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 64, 512 ]
+  },
+  {
+    name: "face_boxes"
+    data_type: TYPE_FP32
+    dims: [ 64, 4 ]
+  },
+  {
+    name: "face_landmarks"
+    data_type: TYPE_FP32
+    dims: [ 64, 10 ]
+  },
+  {
+    name: "face_scores"
+    data_type: TYPE_FP32
+    dims: [ 64 ]
+  },
+  {
+    name: "face_person_idx"
+    data_type: TYPE_INT32
+    dims: [ 64 ]
+  }
+]
+
+instance_group [
+  {
+    count: 4
+    kind: KIND_GPU
+    gpus: [0]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 1, 2, 4, 8 ]
+  max_queue_delay_microseconds: 8000
+}

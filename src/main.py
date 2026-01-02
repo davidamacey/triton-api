@@ -150,7 +150,9 @@ def create_app() -> FastAPI:
             # Batch endpoints allow up to 10GB for large photo library processing
             # Single image endpoints use default limit (50MB)
             is_batch_endpoint = 'predict_batch' in request.url.path
-            max_size = 10 * 1024 * 1024 * 1024 if is_batch_endpoint else settings.max_file_size_bytes
+            max_size = (
+                10 * 1024 * 1024 * 1024 if is_batch_endpoint else settings.max_file_size_bytes
+            )
             max_size_label = '10GB' if is_batch_endpoint else f'{settings.max_file_size_mb}MB'
             if content_length and int(content_length) > max_size:
                 raise HTTPException(
