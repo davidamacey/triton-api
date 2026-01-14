@@ -79,6 +79,7 @@ class IndexName(str, Enum):
     VEHICLES = 'visual_search_vehicles'
     PEOPLE = 'visual_search_people'
     FACES = 'visual_search_faces'
+    OCR = 'visual_search_ocr'  # Text detection and recognition
 
 
 class DetectionCategory(str, Enum):
@@ -162,7 +163,19 @@ class OpenSearchClient:
             ssl_show_warn: Whether to show SSL warnings
             timeout: Request timeout in seconds
         """
-        hosts = hosts or ['http://localhost:9200']
+        # Use OPENSEARCH_HOSTS env var if set (for Docker), otherwise localhost
+        import json
+        import os
+
+        default_hosts = os.environ.get('OPENSEARCH_HOSTS')
+        if default_hosts:
+            try:
+                default_hosts = json.loads(default_hosts)
+            except json.JSONDecodeError:
+                default_hosts = [default_hosts]
+        else:
+            default_hosts = ['http://localhost:9200']
+        hosts = hosts or default_hosts
         client_kwargs = {
             'hosts': hosts,
             'use_ssl': False,
@@ -246,6 +259,7 @@ class OpenSearchClient:
         results[IndexName.VEHICLES.value] = await self.create_vehicles_index(force_recreate)
         results[IndexName.PEOPLE.value] = await self.create_people_index(force_recreate)
         results[IndexName.FACES.value] = await self.create_faces_index(force_recreate)
+        results[IndexName.OCR.value] = await self.create_ocr_index(force_recreate)
         return results
 
     async def create_global_index(self, force_recreate: bool = False) -> bool:
@@ -516,7 +530,78 @@ class OpenSearchClient:
                     'metadata': {'type': 'object', 'enabled': True},
                     'indexed_at': {'type': 'date'},
                     'clustered_at': {'type': 'date'},
+                    'thumbnail_b64': {
+                        'type': 'text',
+                        'index': False,  # Don't index the base64 string for search
+                    },
                 }
+            },
+        }
+
+        return await self._create_index(index_name, index_body, force_recreate)
+
+    async def create_ocr_index(self, force_recreate: bool = False) -> bool:
+        """
+        Create visual_search_ocr index for text detection and recognition.
+
+        Schema:
+        - ocr_id (keyword): Unique OCR result ID (image_id + text index)
+        - image_id (keyword): Source image ID
+        - image_path (keyword): File path or URL
+        - text (text): Detected text with trigram analyzer for fuzzy search
+        - text_raw (keyword): Exact text for keyword matching
+        - box (float[]): [x1,y1,x2,y2,x3,y3,x4,y4] quadrilateral coordinates
+        - box_normalized (float[]): [x1, y1, x2, y2] axis-aligned normalized
+        - det_score (float): Detection confidence
+        - rec_score (float): Recognition confidence
+        - language (keyword): Detected language (optional)
+        - metadata (object): Flexible metadata
+        - indexed_at (date): Ingestion timestamp
+        """
+        index_name = IndexName.OCR.value
+
+        index_body = {
+            'settings': {
+                'index': {
+                    'number_of_shards': 1,
+                    'number_of_replicas': 0,
+                },
+                'analysis': {
+                    'analyzer': {
+                        'trigram_analyzer': {
+                            'type': 'custom',
+                            'tokenizer': 'standard',
+                            'filter': ['lowercase', 'trigram_filter'],
+                        },
+                    },
+                    'filter': {
+                        'trigram_filter': {
+                            'type': 'ngram',
+                            'min_gram': 2,
+                            'max_gram': 4,
+                        },
+                    },
+                },
+            },
+            'mappings': {
+                'properties': {
+                    'ocr_id': {'type': 'keyword'},
+                    'image_id': {'type': 'keyword'},
+                    'image_path': {'type': 'keyword'},
+                    'text': {
+                        'type': 'text',
+                        'analyzer': 'trigram_analyzer',
+                        'search_analyzer': 'standard',
+                    },
+                    'text_raw': {'type': 'keyword'},
+                    'box': {'type': 'float'},  # 8 coords: [x1,y1,x2,y2,x3,y3,x4,y4]
+                    'box_normalized': {'type': 'float'},  # 4 coords: [x1,y1,x2,y2]
+                    'det_score': {'type': 'float'},
+                    'rec_score': {'type': 'float'},
+                    'language': {'type': 'keyword'},
+                    'metadata': {'type': 'object', 'enabled': True},
+                    'indexed_at': {'type': 'date'},
+                },
             },
         }
 
@@ -890,6 +975,79 @@ class OpenSearchClient:
         logger.info(f'Face ingestion: faces={results["faces"]}, clustered={results["clustered"]}')
         return results
 
+    async def index_face(
+        self,
+        face_id: str,
+        image_id: str,
+        image_path: str,
+        embedding: list[float] | np.ndarray,
+        box: list[float],
+        landmarks: list[float] | None = None,
+        confidence: float = 0.0,
+        quality: float = 0.0,
+        person_id: str | None = None,
+        person_name: str | None = None,
+    ) -> bool:
+        """
+        Index a single face detection with ArcFace embedding.
+
+        Args:
+            face_id: Unique identifier for this face
+            image_id: Source image identifier
+            image_path: Path to source image
+            embedding: 512-dim ArcFace embedding
+            box: [x1, y1, x2, y2] normalized bounding box
+            landmarks: Optional [10] flat list of 5-point landmarks (x,y pairs)
+            confidence: Face detection confidence score
+            quality: Face quality score
+            person_id: Optional person identity ID
+            person_name: Optional person name label
+
+        Returns:
+            True if successfully indexed
+        """
+        timestamp = datetime.now(UTC).isoformat()
+
+        # Convert embedding to list if numpy array
+        if hasattr(embedding, 'tolist'):
+            embedding = embedding.tolist()
+
+        # Convert flat landmarks list to named object
+        landmarks_obj = {}
+        if landmarks and len(landmarks) >= 10:
+            landmarks_obj = {
+                'left_eye': [float(landmarks[0]), float(landmarks[1])],
+                'right_eye': [float(landmarks[2]), float(landmarks[3])],
+                'nose': [float(landmarks[4]), float(landmarks[5])],
+                'left_mouth': [float(landmarks[6]), float(landmarks[7])],
+                'right_mouth': [float(landmarks[8]), float(landmarks[9])],
+            }
+
+        face_doc = {
+            'face_id': face_id,
+            'image_id': image_id,
+            'image_path': image_path,
+            'embedding': embedding,
+            'box': box,
+            'landmarks': landmarks_obj,
+            'confidence': confidence,
+            'quality_score': quality,
+            'indexed_at': timestamp,
+        }
+
+        if person_id:
+            face_doc['person_id'] = person_id
+        if person_name:
+            face_doc['person_name'] = person_name
+
+        await self.client.index(
+            index=IndexName.FACES.value,
+            id=face_id,
+            body=face_doc,
+            refresh=False,
+        )
+        return True
+
     async def bulk_ingest(
         self,
         documents: list[dict[str, Any]],
@@ -1169,6 +1327,23 @@ class OpenSearchClient:
             min_score=min_score,
             cluster_ids=cluster_ids,
         )
+
+    async def get_faces_by_person_id(
+        self,
+        person_id: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Get all faces belonging to a person identity."""
+        query = {
+            'query': {'term': {'person_id': person_id}},
+            'size': limit,
+            'sort': [{'confidence': {'order': 'desc'}}],
+        }
+        response = await self.client.search(
+            index=IndexName.FACES.value,
+            body=query,
+        )
+        return [hit['_source'] for hit in response['hits']['hits']]
 
     async def _search_index(
         self,
@@ -1541,7 +1716,13 @@ class OpenSearchClient:
     async def delete_all_indexes(self) -> dict[str, bool]:
         """Delete all visual search indexes."""
         results = {}
-        for index_name in [IndexName.GLOBAL, IndexName.VEHICLES, IndexName.PEOPLE, IndexName.FACES]:
+        for index_name in [
+            IndexName.GLOBAL,
+            IndexName.VEHICLES,
+            IndexName.PEOPLE,
+            IndexName.FACES,
+            IndexName.OCR,
+        ]:
             try:
                 exists = await self.client.indices.exists(index=index_name.value)
                 if exists:
@@ -1554,6 +1735,209 @@ class OpenSearchClient:
                 logger.error(f'Failed to delete {index_name.value}: {e}')
                 results[index_name.value] = False
         return results
+
+    # =========================================================================
+    # OCR Index Operations
+    # =========================================================================
+
+    async def index_ocr_results(
+        self,
+        image_id: str,
+        image_path: str,
+        texts: list[str],
+        boxes: list[list[float]],  # [N, 8] quad coordinates
+        boxes_normalized: list[list[float]],  # [N, 4] axis-aligned normalized
+        det_scores: list[float],
+        rec_scores: list[float],
+        full_text: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Index OCR results for an image.
+
+        Args:
+            image_id: Source image ID
+            image_path: File path or URL
+            texts: List of detected text strings
+            boxes: List of 8-coord quadrilateral boxes
+            boxes_normalized: List of 4-coord axis-aligned boxes [x1,y1,x2,y2]
+            det_scores: Detection confidence scores
+            rec_scores: Recognition confidence scores
+            full_text: Combined text from all regions (for full-text search)
+            metadata: Optional metadata
+
+        Returns:
+            Dict with indexing results
+        """
+        if not texts:
+            return {'indexed': 0, 'errors': []}
+
+        indexed_at = datetime.now(UTC).isoformat()
+        docs = []
+
+        for i, (text, box, box_norm, det_score, rec_score) in enumerate(
+            zip(texts, boxes, boxes_normalized, det_scores, rec_scores, strict=False)
+        ):
+            if not text.strip():  # Skip empty text
+                continue
+
+            ocr_id = f'{image_id}_ocr_{i}'
+            doc = {
+                '_index': IndexName.OCR.value,
+                '_id': ocr_id,
+                '_source': {
+                    'ocr_id': ocr_id,
+                    'image_id': image_id,
+                    'image_path': image_path,
+                    'text': text,
+                    'text_raw': text,
+                    'full_text': full_text or '',  # Combined text for full-text search
+                    'box': box,
+                    'box_normalized': box_norm,
+                    'det_score': float(det_score),
+                    'rec_score': float(rec_score),
+                    'metadata': metadata or {},
+                    'indexed_at': indexed_at,
+                },
+            }
+            docs.append(doc)
+
+        if not docs:
+            return {'indexed': 0, 'errors': []}
+
+        try:
+            success, errors = await async_bulk(self.client, docs, raise_on_error=False)
+            return {
+                'indexed': success,
+                'errors': [str(e) for e in errors] if errors else [],
+            }
+        except Exception as e:
+            logger.error(f'Failed to index OCR results: {e}')
+            return {'indexed': 0, 'errors': [str(e)]}
+
+    async def search_by_text(
+        self,
+        query_text: str,
+        top_k: int = 10,
+        min_score: float = 0.0,
+        exact_match: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        Search for images containing specific text.
+
+        Args:
+            query_text: Text to search for
+            top_k: Maximum number of results
+            min_score: Minimum match score (0-1)
+            exact_match: If True, use exact keyword match instead of fuzzy
+
+        Returns:
+            List of matching OCR results with image info
+        """
+        try:
+            if exact_match:
+                # Exact keyword match
+                query = {
+                    'query': {
+                        'term': {'text_raw': query_text},
+                    },
+                    'size': top_k,
+                }
+            else:
+                # Fuzzy text match with trigram analyzer
+                query = {
+                    'query': {
+                        'bool': {
+                            'should': [
+                                {'match': {'text': {'query': query_text, 'boost': 1.0}}},
+                                {'match_phrase': {'text': {'query': query_text, 'boost': 2.0}}},
+                            ],
+                        },
+                    },
+                    'size': top_k,
+                    'min_score': min_score if min_score > 0 else None,
+                }
+
+            # Remove None values
+            if query.get('min_score') is None:
+                query.pop('min_score', None)
+
+            response = await self.client.search(index=IndexName.OCR.value, body=query)
+
+            results = []
+            for hit in response['hits']['hits']:
+                result = {
+                    'score': hit.get('_score', 0),
+                    'image_id': hit['_source'].get('image_id'),
+                    'image_path': hit['_source'].get('image_path'),
+                    'text': hit['_source'].get('text'),
+                    'box': hit['_source'].get('box'),
+                    'box_normalized': hit['_source'].get('box_normalized'),
+                    'det_score': hit['_source'].get('det_score'),
+                    'rec_score': hit['_source'].get('rec_score'),
+                }
+                results.append(result)
+
+            return results
+
+        except Exception as e:
+            logger.error(f'OCR text search failed: {e}')
+            return []
+
+    async def get_ocr_for_image(self, image_id: str) -> list[dict[str, Any]]:
+        """
+        Get all OCR results for a specific image.
+
+        Args:
+            image_id: Image identifier
+
+        Returns:
+            List of OCR results for the image
+        """
+        try:
+            response = await self.client.search(
+                index=IndexName.OCR.value,
+                body={
+                    'query': {'term': {'image_id': image_id}},
+                    'size': 1000,  # Get all text from image
+                    'sort': [{'det_score': 'desc'}],
+                },
+            )
+
+            return [
+                {
+                    'text': hit['_source'].get('text'),
+                    'box': hit['_source'].get('box'),
+                    'box_normalized': hit['_source'].get('box_normalized'),
+                    'det_score': hit['_source'].get('det_score'),
+                    'rec_score': hit['_source'].get('rec_score'),
+                }
+                for hit in response['hits']['hits']
+            ]
+
+        except Exception as e:
+            logger.error(f'Failed to get OCR for image {image_id}: {e}')
+            return []
+
+    async def delete_ocr_for_image(self, image_id: str) -> int:
+        """
+        Delete all OCR results for a specific image.
+
+        Args:
+            image_id: Image identifier
+
+        Returns:
+            Number of deleted documents
+        """
+        try:
+            response = await self.client.delete_by_query(
+                index=IndexName.OCR.value,
+                body={'query': {'term': {'image_id': image_id}}},
+            )
+            return response.get('deleted', 0)
+        except Exception as e:
+            logger.error(f'Failed to delete OCR for image {image_id}: {e}')
+            return 0
 
 
 # Convenience function for standalone usage

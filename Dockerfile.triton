@@ -13,6 +13,9 @@ RUN pip install --no-cache-dir \
     torchvision==0.20.1 \
     --index-url https://download.pytorch.org/whl/cu124
 
+# Install OpenCV for OCR pipeline (text region cropping and perspective transform)
+RUN pip install --no-cache-dir opencv-python-headless
+
 # Verify installation
 RUN python3 -c "import torch; print(f'PyTorch {torch.__version__} installed, CUDA: {torch.cuda.is_available()}')"
 RUN python3 -c "import torchvision; print(f'TorchVision {torchvision.__version__} installed')"

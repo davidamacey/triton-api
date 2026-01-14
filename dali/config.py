@@ -38,6 +38,15 @@ ARCFACE_SIZE: int = 112  # ArcFace aligned face size
 # HD cropping (Track E full only)
 CROP_IMAGE_MAX_SIZE: int = 1920  # Max pixels on longest edge
 
+# PP-OCRv5 text detection preprocessing
+OCR_MAX_SIZE: int = 960  # Max resolution for text detection
+OCR_PAD_ALIGN: int = 32  # Pad to multiples of 32
+OCR_REC_HEIGHT: int = 48  # Text recognition input height
+OCR_REC_WIDTH: int = 320  # Text recognition input width
+# OCR uses different normalization: (x / 127.5) - 1 = x * (1/127.5) - 1
+OCR_NORM_MEAN: list[float] = [127.5, 127.5, 127.5]
+OCR_NORM_STD: list[float] = [127.5, 127.5, 127.5]
+
 # Pipeline settings
 MAX_BATCH_SIZE: int = 128
 NUM_THREADS: int = 4
@@ -71,6 +80,14 @@ TRACK_D_DALI_MODELS: dict[str, str] = {
 TRACK_E_DUAL_DALI_MODEL: str = 'dual_preprocess_dali'  # Triple-branch (YOLO + CLIP + HD)
 TRACK_E_SIMPLE_DALI_MODEL: str = 'yolo_clip_preprocess_dali'  # Dual-branch (YOLO + CLIP)
 TRACK_E_QUAD_DALI_MODEL: str = 'quad_preprocess_dali'  # Quad-branch (YOLO + CLIP + SCRFD + HD)
+TRACK_E_PENTA_DALI_MODEL: str = (
+    'penta_preprocess_dali'  # Penta-branch (YOLO + CLIP + SCRFD + HD + OCR)
+)
+
+# OCR models
+OCR_DET_MODEL: str = 'paddleocr_det_trt'  # PP-OCRv5 detection
+OCR_REC_MODEL: str = 'paddleocr_rec_trt'  # PP-OCRv5 recognition
+OCR_PIPELINE_MODEL: str = 'ocr_pipeline'  # Python BLS orchestrator
 
 # Default paths
 DEFAULT_MODEL_DIR: Path = Path(os.getenv('TRITON_MODEL_REPO', '/app/models'))
@@ -84,11 +101,12 @@ DEFAULT_TEST_IMAGE: Path = Path('/app/test_images/bus.jpg')
 # Track D outputs
 TRACK_D_OUTPUT_PREPROCESSED: str = 'preprocessed_images'
 
-# Track E outputs (dual/triple/quad-branch)
+# Track E outputs (dual/triple/quad/penta-branch)
 TRACK_E_OUTPUT_YOLO: str = 'yolo_images'
 TRACK_E_OUTPUT_CLIP: str = 'clip_images'
-TRACK_E_OUTPUT_ORIGINAL: str = 'original_images'  # Only in triple/quad-branch
-TRACK_E_OUTPUT_FACE: str = 'face_images'  # Only in quad-branch (SCRFD)
+TRACK_E_OUTPUT_ORIGINAL: str = 'original_images'  # Only in triple/quad/penta-branch
+TRACK_E_OUTPUT_FACE: str = 'face_images'  # Only in quad/penta-branch (SCRFD)
+TRACK_E_OUTPUT_OCR: str = 'ocr_images'  # Only in penta-branch (PP-OCR)
 
 # Detection outputs (from TRT End2End)
 OUTPUT_NUM_DETS: str = 'num_dets'
@@ -204,6 +222,8 @@ class DALIConfig:
     clip_size: int = CLIP_SIZE
     pad_value: int = YOLO_PAD_VALUE
     crop_image_max_size: int = CROP_IMAGE_MAX_SIZE
+    ocr_max_size: int = OCR_MAX_SIZE
+    ocr_pad_align: int = OCR_PAD_ALIGN
 
     # Pipeline settings
     max_batch_size: int = MAX_BATCH_SIZE
@@ -244,3 +264,7 @@ class DALIConfig:
     def get_track_e_simple_model_path(self) -> Path:
         """Get the path for Track E simple DALI model (dual-branch)."""
         return self.model_dir / TRACK_E_SIMPLE_DALI_MODEL / '1' / 'model.dali'
+
+    def get_track_e_penta_model_path(self) -> Path:
+        """Get the path for Track E penta DALI model (5-branch with OCR)."""
+        return self.model_dir / TRACK_E_PENTA_DALI_MODEL / '1' / 'model.dali'

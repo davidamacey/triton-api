@@ -29,11 +29,11 @@ Usage:
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 import sys
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -42,21 +42,38 @@ import requests
 from PIL import Image
 
 
-# Add src to path
-sys.path.insert(0, '/app')
+# Add src to path (works both inside container and externally)
+script_dir = Path(__file__).parent.absolute()
+repo_root = script_dir.parent
+sys.path.insert(0, str(repo_root))
+sys.path.insert(0, '/app')  # Container path
 
-import contextlib
 
-from src.clients.opensearch import IndexName, OpenSearchClient
+try:
+    from src.clients.opensearch import IndexName, OpenSearchClient
+
+    HAS_OPENSEARCH = True
+except ImportError:
+    HAS_OPENSEARCH = False
+    OpenSearchClient = None
+    # Define IndexName enum for external use
+    from enum import Enum
+
+    class IndexName(Enum):
+        GLOBAL = 'visual_search_global'
+        VEHICLES = 'visual_search_vehicles'
+        PEOPLE = 'visual_search_people'
+        FACES = 'visual_search_faces'
+        OCR = 'visual_search_ocr'
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Configuration
-API_BASE = 'http://localhost:8000'
+API_BASE = 'http://localhost:4603'  # External API port
 BATCH_SIZE = 16
-MAX_WORKERS = 4
+MAX_WORKERS = 16  # Parallel workers for higher throughput
 
 # COCO class mappings
 VEHICLE_CLASSES = {2: 'car', 3: 'motorcycle', 5: 'bus', 7: 'truck', 8: 'boat'}
@@ -78,45 +95,125 @@ def find_images(directory: Path, max_images: int = 1000) -> list[Path]:
     return sorted(images)
 
 
-def process_image_full(image_path: Path) -> dict | None:
-    """Process image through unified pipeline to get all detections."""
+def ingest_single_image(image_path: Path) -> dict | None:
+    """Ingest single image using /track_e/ingest endpoint which handles all indexing."""
     try:
         with open(image_path, 'rb') as f:
             image_bytes = f.read()
 
-        # Use the unified faces/full endpoint for YOLO + SCRFD + MobileCLIP + ArcFace
+        # Use the /ingest endpoint which runs full pipeline and indexes to OpenSearch
         response = requests.post(
-            f'{API_BASE}/track_e/faces/full',
-            files={'image': (image_path.name, image_bytes, 'image/jpeg')},
-            timeout=60,
+            f'{API_BASE}/track_e/ingest',
+            files={'file': (image_path.name, image_bytes, 'image/jpeg')},
+            params={
+                'image_path': str(image_path),
+                'skip_duplicates': 'false',
+                'detect_near_duplicates': 'false',
+                'enable_ocr': 'false',
+            },
+            timeout=120,
         )
 
         if response.status_code != 200:
             logger.debug(f'API error for {image_path}: {response.text[:100]}')
-            return None
+            return {'status': 'error', 'error': response.text[:100]}
 
         data = response.json()
+        indexed = data.get('indexed', {})
 
         return {
             'image_path': str(image_path),
-            'image_id': str(uuid.uuid4())[:8],
-            # YOLO detections
-            'num_dets': data.get('num_dets', 0),
-            'detections': data.get('detections', []),
-            'global_embedding': data.get('global_embedding'),
-            'box_embeddings': data.get('box_embeddings', []),
-            # Face detections
+            'status': data.get('status', 'error'),
+            'image_id': data.get('image_id'),
+            'num_detections': data.get('num_detections', 0),
             'num_faces': data.get('num_faces', 0),
-            'faces': data.get('faces', []),
-            'face_embeddings': data.get('face_embeddings', []),
-            # Image metadata
-            'image_width': data.get('image', {}).get('width', 0),
-            'image_height': data.get('image', {}).get('height', 0),
+            'global': indexed.get('global', False),
+            'vehicles': indexed.get('vehicles', 0),
+            'people': indexed.get('people', 0),
+            'faces': indexed.get('faces', 0),
         }
 
     except Exception as e:
-        logger.debug(f'Failed to process {image_path}: {e}')
-        return None
+        logger.debug(f'Failed to ingest {image_path}: {e}')
+        return {'status': 'error', 'error': str(e)}
+
+
+def ingest_batch_images(image_paths: list[Path]) -> list[dict]:
+    """Ingest batch of images using /track_e/ingest_batch endpoint for higher throughput."""
+    try:
+        # Prepare files for multipart upload
+        files = []
+        paths_str = []
+        for img_path in image_paths:
+            with open(img_path, 'rb') as f:
+                image_bytes = f.read()
+            files.append(('files', (img_path.name, image_bytes, 'image/jpeg')))
+            paths_str.append(str(img_path))
+
+        # Use batch endpoint
+        response = requests.post(
+            f'{API_BASE}/track_e/ingest_batch',
+            files=files,
+            params={
+                'image_paths': ','.join(paths_str),
+                'skip_duplicates': 'false',
+                'detect_near_duplicates': 'false',
+                'enable_ocr': 'false',  # OCR is slow, disable for bulk ingest
+            },
+            timeout=300,
+        )
+
+        if response.status_code != 200:
+            logger.warning(f'Batch API error: {response.text[:200]}')
+            return [{'status': 'error', 'error': response.text[:100]} for _ in image_paths]
+
+        data = response.json()
+
+        # Batch endpoint returns summary, not per-image results
+        # Convert to per-image format for consistency
+        indexed = data.get('indexed', {})
+        processed = data.get('processed', 0)
+        duplicates = data.get('duplicates', 0)
+        errors = data.get('errors', 0)
+
+        # Create result entries
+        results = []
+        success_count = processed  # Images that were processed and indexed
+
+        for i, img_path in enumerate(image_paths):
+            # Mark as success if within the processed count
+            is_success = i < success_count
+            results.append(
+                {
+                    'image_path': str(img_path),
+                    'status': 'success' if is_success else 'duplicate',
+                    'image_id': None,
+                    'num_detections': 0,
+                    'num_faces': 0,
+                    'global': is_success,
+                    'vehicles': indexed.get('vehicles', 0) // max(1, processed)
+                    if is_success
+                    else 0,
+                    'people': indexed.get('people', 0) // max(1, processed) if is_success else 0,
+                    'faces': indexed.get('faces', 0) // max(1, processed) if is_success else 0,
+                }
+            )
+
+        # Override totals with batch summary (more accurate)
+        if results:
+            results[0]['_batch_summary'] = {
+                'processed': processed,
+                'duplicates': duplicates,
+                'errors': errors,
+                'indexed': indexed,
+                'timing': data.get('timing', {}),
+            }
+
+        return results
+
+    except Exception as e:
+        logger.warning(f'Batch ingestion failed: {e}')
+        return [{'status': 'error', 'error': str(e)} for _ in image_paths]
 
 
 async def ingest_to_all_indexes(
@@ -454,18 +551,28 @@ async def main(args):
     logger.info('Multi-Index Ingestion Pipeline')
     logger.info('=' * 70)
 
-    opensearch = OpenSearchClient()
-    await opensearch.connect()
+    opensearch = OpenSearchClient() if HAS_OPENSEARCH else None
 
     try:
-        # Step 1: Create indexes
+        # Step 1: Create indexes via API (works from external clients)
         if args.recreate_indexes:
-            logger.info('\nStep 1: Creating all indexes...')
-            await opensearch.create_all_indexes(force_recreate=True)
-            logger.info('All indexes created')
+            logger.info('\nStep 1: Recreating all indexes via API...')
+            try:
+                # Delete all indexes first
+                resp = requests.delete(f'{API_BASE}/track_e/index', timeout=30)
+                if resp.status_code == 200:
+                    logger.info('All indexes deleted')
+                # Recreate indexes
+                resp = requests.post(f'{API_BASE}/track_e/index/create', timeout=30)
+                if resp.status_code == 200:
+                    logger.info('All indexes recreated via API')
+                else:
+                    logger.warning(f'Index creation returned: {resp.text[:100]}')
+            except Exception as e:
+                logger.warning(f'Could not recreate indexes via API: {e}')
+                logger.info('Indexes will be created automatically during ingestion')
         else:
-            logger.info('\nStep 1: Ensuring indexes exist...')
-            await opensearch.create_all_indexes(force_recreate=False)
+            logger.info('\nStep 1: Indexes will be created automatically during ingestion')
 
         # Step 2: Find images
         images_dir = Path(args.images_dir)
@@ -480,57 +587,91 @@ async def main(args):
         if not images:
             return 1
 
-        # Step 3: Process images
-        logger.info('\nStep 3: Processing images through unified pipeline...')
-        image_data = []
+        # Step 3: Ingest images via /track_e/ingest_batch endpoint for high throughput
+        logger.info('\nStep 3: Ingesting images via /track_e/ingest_batch endpoint...')
+        logger.info(f'Using batch size {BATCH_SIZE} with {MAX_WORKERS} parallel workers')
+
+        start_time = time.time()
+        results = []
         processed = 0
 
+        # Split images into batches
+        batches = [images[i : i + BATCH_SIZE] for i in range(0, len(images), BATCH_SIZE)]
+        logger.info(f'Processing {len(batches)} batches of up to {BATCH_SIZE} images each')
+
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(process_image_full, img): img for img in images}
+            futures = {executor.submit(ingest_batch_images, batch): batch for batch in batches}
 
-            for future in futures:
-                result = future.result()
-                if result:
-                    image_data.append(result)
+            for future, batch in futures.items():
+                batch_results = future.result()
+                if batch_results:
+                    results.extend(batch_results)
 
-                processed += 1
-                if processed % 20 == 0:
-                    logger.info(f'Processed {processed}/{len(images)} images')
+                processed += len(batch)
+                elapsed = time.time() - start_time
+                rate = processed / elapsed if elapsed > 0 else 0
+                logger.info(f'Processed {processed}/{len(images)} images ({rate:.1f} img/sec)')
 
-        logger.info(f'Successfully processed {len(image_data)}/{len(images)} images')
+        elapsed = time.time() - start_time
 
-        if not image_data:
-            logger.error('No images processed successfully')
-            return 1
+        # Calculate stats from batch summaries (more accurate than per-image)
+        total_processed = 0
+        total_duplicates = 0
+        total_errors = 0
+        stats = {
+            'global': 0,
+            'vehicles': 0,
+            'people': 0,
+            'faces': 0,
+            'ocr': 0,
+        }
 
-        # Step 4: Ingest to indexes
-        logger.info('\nStep 4: Ingesting to all indexes...')
-        stats = await ingest_to_all_indexes(opensearch, image_data)
+        for r in results:
+            summary = r.get('_batch_summary')
+            if summary:
+                total_processed += summary.get('processed', 0)
+                total_duplicates += summary.get('duplicates', 0)
+                total_errors += summary.get('errors', 0)
+                indexed = summary.get('indexed', {})
+                stats['global'] += indexed.get('global', 0)
+                stats['vehicles'] += indexed.get('vehicles', 0)
+                stats['people'] += indexed.get('people', 0)
+                stats['faces'] += indexed.get('faces', 0)
+                stats['ocr'] += indexed.get('ocr', 0)
 
-        logger.info('Ingestion complete:')
-        logger.info(f'  Global embeddings: {stats["global"]}')
-        logger.info(f'  Vehicle detections: {stats["vehicles"]}')
-        logger.info(f'  Person detections: {stats["people"]}')
-        logger.info(f'  Face detections: {stats["faces"]}')
+        success_count = total_processed
 
-        # Step 5: Cluster each index
-        logger.info('\nStep 5: Clustering all indexes...')
-        cluster_stats = {}
+        logger.info(
+            f'\nIngestion complete in {elapsed:.1f}s ({len(images) / elapsed:.1f} images/sec):'
+        )
+        logger.info(f'  Processed: {success_count}/{len(images)} images')
+        logger.info(f'  Duplicates skipped: {total_duplicates}')
+        logger.info(f'  Errors: {total_errors}')
+        logger.info(
+            f'  Indexed - Global: {stats["global"]}, Vehicles: {stats["vehicles"]}, People: {stats["people"]}, Faces: {stats["faces"]}'
+        )
 
-        for index_name, n_clusters in [
-            (IndexName.GLOBAL, 30),
-            (IndexName.VEHICLES, 20),
-            (IndexName.PEOPLE, 30),
-            (IndexName.FACES, 40),
-        ]:
-            try:
-                result = await cluster_index(opensearch, index_name, n_clusters)
-                cluster_stats[index_name.value] = result
-                logger.info(
-                    f'  {index_name.value}: {result["clusters"]} clusters, {result["items"]} items'
-                )
-            except Exception as e:
-                logger.warning(f'  {index_name.value}: clustering failed - {e}')
+        # Step 5: Cluster each index (optional, requires OpenSearch access)
+        if not args.skip_clustering:
+            logger.info('\nStep 5: Clustering all indexes...')
+            cluster_stats = {}
+
+            for index_name, n_clusters in [
+                (IndexName.GLOBAL, 30),
+                (IndexName.VEHICLES, 20),
+                (IndexName.PEOPLE, 30),
+                (IndexName.FACES, 40),
+            ]:
+                try:
+                    result = await cluster_index(opensearch, index_name, n_clusters)
+                    cluster_stats[index_name.value] = result
+                    logger.info(
+                        f'  {index_name.value}: {result["clusters"]} clusters, {result["items"]} items'
+                    )
+                except Exception as e:
+                    logger.warning(f'  {index_name.value}: clustering failed - {e}')
+        else:
+            logger.info('\nStep 5: Skipping clustering (--skip-clustering)')
 
         # Step 6: Create mosaics
         if args.create_mosaics:
@@ -553,29 +694,40 @@ async def main(args):
         logger.info('\n' + '=' * 70)
         logger.info('PIPELINE COMPLETE')
         logger.info('=' * 70)
-        logger.info(f'Images processed: {len(image_data)}')
+        logger.info(f'Images processed: {success_count}/{len(images)}')
+        logger.info(f'Total time: {elapsed:.1f}s ({len(images) / elapsed:.1f} images/sec)')
         for idx, count in stats.items():
-            if idx != 'images':
-                logger.info(f'  {idx}: {count}')
+            logger.info(f'  {idx}: {count}')
 
         if args.create_mosaics:
             logger.info(f'\nMosaics saved to: {Path(args.output_dir) / "clusters"}')
 
         return 0
 
-    finally:
-        await opensearch.close()
+    except Exception as e:
+        logger.error(f'Pipeline failed: {e}')
+        return 1
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Multi-Index Ingestion Pipeline')
     parser.add_argument('--images-dir', type=str, required=True, help='Images directory')
-    parser.add_argument('--max-images', type=int, default=200, help='Max images to process')
-    parser.add_argument('--output-dir', type=str, default='/app/outputs', help='Output directory')
+    parser.add_argument('--max-images', type=int, default=5000, help='Max images to process')
+    parser.add_argument('--batch-size', type=int, default=16, help='Batch size for ingestion')
+    parser.add_argument('--workers', type=int, default=16, help='Number of parallel workers')
+    parser.add_argument('--output-dir', type=str, default='./outputs', help='Output directory')
     parser.add_argument('--recreate-indexes', action='store_true', help='Recreate all indexes')
+    parser.add_argument('--skip-clustering', action='store_true', help='Skip clustering step')
     parser.add_argument(
         '--create-mosaics', action='store_true', help='Create mosaic visualizations'
     )
 
     args = parser.parse_args()
+
+    # Allow overriding globals from command line
+    if args.batch_size:
+        BATCH_SIZE = args.batch_size
+    if args.workers:
+        MAX_WORKERS = args.workers
+
     sys.exit(asyncio.run(main(args)))

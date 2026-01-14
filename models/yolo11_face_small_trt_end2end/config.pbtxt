@@ -1,0 +1,58 @@
+# YOLO11-face TensorRT End2End model
+# Face detection with built-in GPU NMS (no keypoints in End2End mode)
+# Input: RGB images normalized [0,1]
+# Output: Post-NMS detections (boxes in [0,1] range)
+
+name: "yolo11_face_small_trt_end2end"
+platform: "tensorrt_plan"
+max_batch_size: 64
+
+input [
+  {
+    name: "images"
+    data_type: TYPE_FP32
+    dims: [ 3, 640, 640 ]
+  }
+]
+
+output [
+  {
+    name: "num_dets"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "det_boxes"
+    data_type: TYPE_FP32
+    dims: [ 100, 4 ]
+  },
+  {
+    name: "det_scores"
+    data_type: TYPE_FP32
+    dims: [ 100 ]
+  },
+  {
+    name: "det_classes"
+    data_type: TYPE_INT32
+    dims: [ 100 ]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 4, 8, 16, 32 ]
+  max_queue_delay_microseconds: 10000
+}
+
+instance_group [
+  {
+    count: 2
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+version_policy {
+  latest {
+    num_versions: 1
+  }
+}

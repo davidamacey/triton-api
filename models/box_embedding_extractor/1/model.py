@@ -146,42 +146,59 @@ class TritonPythonModel:
         # (pixel coords in 640x640 would have values > 1.0)
         return float(boxes.max()) <= 1.0
 
-    def _scale_boxes_to_dali_hd_space(self, boxes, yolo_scale, pad_x, pad_y, dali_h, dali_w):
+    def _scale_boxes_to_original_space(self, boxes, yolo_scale, pad_x, pad_y, img_h, img_w):
         """
-        Scale boxes from YOLO 640×640 space to DALI HD image space.
+        Scale boxes from YOLO 640×640 letterbox space to original image space.
 
-        The DALI HD image has max dimension 1920 while preserving aspect ratio.
-        The boxes need to be transformed from letterbox space to HD image space.
+        The original_image tensor may be:
+        - Native resolution (if image was < 1920px, no resize applied)
+        - Downscaled (if image was > 1920px, max_size=[1920,1920] applied)
 
         Pipeline:
         1. Remove letterbox padding from YOLO coords
-        2. Divide by yolo_scale to get original image coords
-        3. Scale to DALI HD dims (which is original * dali_scale)
+        2. Divide by yolo_scale to get coordinates in original image space
+        3. Scale proportionally to match actual img_h x img_w dimensions
 
         Args:
             boxes: Tensor [N, 4] in [x1, y1, x2, y2] format (YOLO 640×640 space)
-            yolo_scale: float - YOLO letterbox scale factor
+            yolo_scale: float - YOLO letterbox scale factor (original → 640 mapping)
             pad_x: float - horizontal padding in YOLO space
             pad_y: float - vertical padding in YOLO space
-            dali_h: int - DALI HD image height
-            dali_w: int - DALI HD image width
+            img_h: int - Actual original_image tensor height
+            img_w: int - Actual original_image tensor width
 
         Returns:
-            Tensor [N, 4] in DALI HD image pixel coordinates
+            Tensor [N, 4] in original_image pixel coordinates
         """
         if boxes.shape[0] == 0:
             return boxes
 
-        # Calculate original image's longest dimension from YOLO scale
+        # Step 1: Calculate original image dimensions from YOLO affine matrix
+        # yolo_scale = 640 / max(orig_h, orig_w)
+        # So: max(orig_h, orig_w) = 640 / yolo_scale
         original_max_dim = self.yolo_size / yolo_scale
 
-        # Calculate DALI scale factor (how much DALI scaled from original)
-        dali_max_dim = max(dali_h, dali_w)
-        dali_scale = dali_max_dim / original_max_dim
+        # Calculate original dimensions (before any YOLO or DALI processing)
+        # From affine matrix: scaled_w = orig_w * yolo_scale, pad_x = (640 - scaled_w) / 2
+        # So: scaled_w = 640 - 2*pad_x, and orig_w = scaled_w / yolo_scale
+        orig_w = (self.yolo_size - 2 * pad_x) / yolo_scale
+        orig_h = (self.yolo_size - 2 * pad_y) / yolo_scale
 
-        # Combined transformation: yolo → original → dali
-        # dali_px = (yolo_px - pad) / yolo_scale * dali_scale
-        # Simplify: dali_px = (yolo_px - pad) * (dali_scale / yolo_scale)
+        # Step 2: Calculate DALI resize scale (if any)
+        # The original_image tensor may have been downscaled by max_size=[1920,1920]
+        # If original was < 1920px on both dimensions, no resize occurred
+        # If original was > 1920px on either dimension, it was downscaled
+        dali_scale_w = img_w / orig_w
+        dali_scale_h = img_h / orig_h
+
+        # Both scales should be equal (aspect ratio preserved) or ~1.0 (no resize)
+        # Use average for numerical stability
+        dali_scale = (dali_scale_w + dali_scale_h) / 2.0
+
+        # Step 3: Transform boxes from YOLO letterbox → original_image tensor
+        # yolo_px → original_px: (yolo_px - pad) / yolo_scale
+        # original_px → tensor_px: original_px * dali_scale
+        # Combined: (yolo_px - pad) / yolo_scale * dali_scale = (yolo_px - pad) * (dali_scale / yolo_scale)
         combined_scale = dali_scale / yolo_scale
 
         boxes_out = boxes.clone()
@@ -421,19 +438,19 @@ class TritonPythonModel:
                     logger.debug("Detected pixel coordinate boxes (640x640 space)")
                     boxes_yolo_space = valid_boxes
 
-                # Get DALI HD image dimensions
+                # Get original_image tensor dimensions (may be native resolution or downscaled)
                 img_h, img_w = original_image.shape[1], original_image.shape[2]
 
-                # Scale boxes from YOLO 640×640 space to DALI HD image space
-                boxes_dali_space = self._scale_boxes_to_dali_hd_space(
+                # Scale boxes from YOLO 640×640 space to original_image tensor space
+                boxes_tensor_space = self._scale_boxes_to_original_space(
                     boxes_yolo_space, scale, pad_x, pad_y, img_h, img_w
                 )
 
-                # Normalize boxes to [0, 1] range based on DALI HD dimensions
-                boxes_normalized = self._normalize_boxes(boxes_dali_space, img_w, img_h)
+                # Normalize boxes to [0, 1] range based on tensor dimensions
+                boxes_normalized = self._normalize_boxes(boxes_tensor_space, img_w, img_h)
 
-                # Crop boxes from DALI HD image
-                cropped_boxes = self._crop_boxes(original_image, boxes_dali_space)  # [num_dets, 3, 256, 256]
+                # Crop boxes from original_image tensor
+                cropped_boxes = self._crop_boxes(original_image, boxes_tensor_space)  # [num_dets, 3, 256, 256]
 
                 if cropped_boxes.shape[0] == 0:
                     logger.warning("All boxes invalid after cropping, returning zero embeddings")

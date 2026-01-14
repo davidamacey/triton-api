@@ -52,6 +52,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+
+# Add app root to path for dali.config import
+sys.path.insert(0, '/app')
+
 import numpy as np
 
 # Import shared configuration
@@ -80,7 +84,10 @@ def dual_preprocess_pipeline():
     Outputs:
         yolo_images: [N, 3, 640, 640] FP32, normalized [0, 1]
         clip_images: [N, 3, 256, 256] FP32, normalized [0, 1]
-        original_images: [N, 3, H, W] FP32, normalized [0, 1] - NATIVE resolution (no resize)
+        original_images: [N, 3, H, W] FP32, normalized [0, 1] - capped at 1920px, NO UPSCALE
+
+    Note: crop_target_size is computed INTERNALLY using fn.peek_image_shape() to avoid
+    requiring ensemble changes. This computes min(max(H, W), 1920) per image.
     """
 
     # =========================================================================
@@ -94,6 +101,25 @@ def dual_preprocess_pipeline():
         dtype=types.FLOAT,
         ndim=2,  # [2, 3]
     )
+
+    # =========================================================================
+    # Step 1b: Compute crop target size internally (no external input needed)
+    # =========================================================================
+    # Peek at image dimensions from JPEG header (no decode needed)
+    # Returns [H, W, C] shape
+    img_shape = fn.peek_image_shape(encoded, dtype=types.FLOAT)
+
+    # Extract H and W (shape is [H, W, C])
+    img_h = fn.slice(img_shape, start=[0], shape=[1], axes=[0])
+    img_w = fn.slice(img_shape, start=[1], shape=[1], axes=[0])
+
+    # Compute max(H, W) - longest edge
+    longest_edge = dali.math.max(img_h, img_w)
+
+    # Compute min(longest_edge, CROP_IMAGE_MAX_SIZE) - cap at 1920
+    # This prevents upscaling: small images stay small, large images get capped
+    crop_max_size = types.Constant(CROP_IMAGE_MAX_SIZE, dtype=types.FLOAT)
+    crop_target_size = dali.math.min(longest_edge, crop_max_size)
 
     # =========================================================================
     # Step 2: Shared JPEG decode (GPU - nvJPEG)
@@ -166,19 +192,27 @@ def dual_preprocess_pipeline():
     # =========================================================================
     # Branch 3: Cropping image (HD resolution cap - no upscale!)
     # =========================================================================
-    # Resize large images so longest edge ≤ 1920px (HD resolution)
+    # Resize large images so longest edge <= 1920px (HD resolution)
     # Small images are NOT upscaled - preserves original quality
     #
-    # This branch provides the image for detection cropping:
-    # - Much better quality than 640x640 YOLO (which has letterbox padding)
-    # - Predictable GPU memory (max 14.7MB vs 36MB+ for 4K native)
+    # Benefits:
+    # - Predictable GPU memory: max 14.7MB per image (vs 238MB for 5472x3648)
     # - Prevents memory fragmentation at high concurrency (256+ workers)
+    # - Still excellent quality for embedding crops (1920px is plenty)
+    # - No upscaling artifacts on small images
     #
-    # Flow: YOLO detects on 640 → boxes scaled to this image → crop → CLIP embed
+    # Memory footprint:
+    # - Max: 14.7MB per image (1920x1920 worst case for square)
+    # - Typical: 6-8MB per image (most photos are 16:9 or 3:2)
+    #
+    # Flow: YOLO detects on 640 → boxes scaled to HD image → crop → CLIP embed
+
+    # Resize to target size (computed on CPU as min(longest_edge, 1920))
+    # - Large images: downscaled to fit 1920px cap
+    # - Small images: kept at original size (NO upscale!)
     crop_images = fn.resize(
         images,
-        resize_longer=CROP_IMAGE_MAX_SIZE,  # Cap longest edge at 1920px
-        subpixel_scale=False,  # Don't upscale if already smaller
+        resize_longer=crop_target_size,  # Dynamic per-image target
         interp_type=types.INTERP_LINEAR,
         device='gpu',
     )
@@ -189,7 +223,7 @@ def dual_preprocess_pipeline():
         mean=[0.0, 0.0, 0.0],
         std=[255.0, 255.0, 255.0],  # ÷255 (MobileCLIP2-S2 standard)
         output_layout='CHW',
-        output_dtype=types.FLOAT,
+        dtype=types.FLOAT,
         device='gpu',
     )
 
@@ -314,6 +348,26 @@ parameters: {{
     print(f'[OK] Config created: {config_path}')
 
 
+def compute_crop_target_size(width: int, height: int, max_size: int = CROP_IMAGE_MAX_SIZE) -> float:
+    """
+    Compute target size for cropping: min(longest_edge, max_size).
+
+    This is the key function that prevents upscaling:
+    - If image is smaller than max_size: keep original size
+    - If image is larger than max_size: downscale to cap
+
+    Args:
+        width: Image width
+        height: Image height
+        max_size: Maximum allowed longest edge (default 1920)
+
+    Returns:
+        Target size for resize_longer (float)
+    """
+    longest_edge = max(width, height)
+    return float(min(longest_edge, max_size))
+
+
 def test_pipeline():
     """Test the pipeline with dummy data."""
     print('\n' + '=' * 80)
@@ -324,8 +378,8 @@ def test_pipeline():
 
     from PIL import Image
 
-    # Create test image (1080x810 - typical photo aspect ratio)
-    print('\nCreating test image (1080x810)...')
+    # Test 1: Medium image (1080x810 - should keep original size, NO upscale)
+    print('\n--- Test 1: Medium image (1080x810) - should keep original size ---')
     test_img = np.random.randint(0, 255, (1080, 810, 3), dtype=np.uint8)
     pil_img = Image.fromarray(test_img)
 
@@ -347,13 +401,18 @@ def test_pipeline():
 
     affine_matrix = np.array([[scale, 0.0, pad_x], [0.0, scale, pad_y]], dtype=np.float32)
 
+    # Crop target size is now computed INTERNALLY using fn.peek_image_shape()
+    expected_crop_target = compute_crop_target_size(orig_w, orig_h)
     print(f'  Affine matrix: scale={scale:.4f}, pad=({pad_x:.1f}, {pad_y:.1f})')
+    print(
+        f'  Expected crop target: {expected_crop_target} (min of {max(orig_w, orig_h)} and {CROP_IMAGE_MAX_SIZE})'
+    )
 
     # Build pipeline
     pipe = dual_preprocess_pipeline(batch_size=1, num_threads=2, device_id=0)
     pipe.build()
 
-    # Feed data
+    # Feed data (no crop_target_sizes - computed internally!)
     print('\nRunning pipeline...')
     pipe.feed_input('encoded_images', [np.frombuffer(jpeg_bytes, dtype=np.uint8)])
     pipe.feed_input('affine_matrices', [affine_matrix])
@@ -375,20 +434,9 @@ def test_pipeline():
     print(f'    Dtype: {clip_out.dtype}')
     print(f'    Range: [{clip_out.min():.4f}, {clip_out.max():.4f}]')
 
-    # Calculate expected cropping image size (HD cap with resize_longer)
-    # subpixel_scale=False means small images are not upscaled
-    if max(orig_h, orig_w) > CROP_IMAGE_MAX_SIZE:
-        # Scale down so longest edge = CROP_IMAGE_MAX_SIZE
-        scale_factor = CROP_IMAGE_MAX_SIZE / max(orig_h, orig_w)
-        expected_crop_h = round(orig_h * scale_factor)
-        expected_crop_w = round(orig_w * scale_factor)
-    else:
-        # No upscaling - keep original size
-        expected_crop_h = orig_h
-        expected_crop_w = orig_w
-
-    print(f'\n[OK] Cropping image output (HD cap at {CROP_IMAGE_MAX_SIZE}px):')
-    print(f'    Shape: {orig_out.shape} (expected: [3, {expected_crop_h}, {expected_crop_w}])')
+    # Cropping image should be at ORIGINAL size (no upscale since 1080 < 1920)
+    print('\n[OK] Cropping image output (NO upscale - original size):')
+    print(f'    Shape: {orig_out.shape} (expected: [3, {orig_h}, {orig_w}])')
     print(f'    Dtype: {orig_out.dtype}')
     print(f'    Range: [{orig_out.min():.4f}, {orig_out.max():.4f}]')
     print(f'    Memory: {orig_out.nbytes / 1024 / 1024:.2f} MB')
@@ -396,12 +444,9 @@ def test_pipeline():
     # Validate
     assert yolo_out.shape == (3, YOLO_SIZE, YOLO_SIZE), f'Wrong YOLO shape: {yolo_out.shape}'
     assert clip_out.shape == (3, CLIP_SIZE, CLIP_SIZE), f'Wrong CLIP shape: {clip_out.shape}'
-    # Check cropping image respects max size (allow small rounding differences)
-    assert orig_out.shape[1] <= CROP_IMAGE_MAX_SIZE + 1, (
-        f'Crop height {orig_out.shape[1]} exceeds max {CROP_IMAGE_MAX_SIZE}'
-    )
-    assert orig_out.shape[2] <= CROP_IMAGE_MAX_SIZE + 1, (
-        f'Crop width {orig_out.shape[2]} exceeds max {CROP_IMAGE_MAX_SIZE}'
+    # Cropping image should be at original size (since 1080 < 1920, NO upscale)
+    assert orig_out.shape == (3, orig_h, orig_w), (
+        f'Image was resized! Got {orig_out.shape}, expected (3, {orig_h}, {orig_w})'
     )
     assert yolo_out.dtype == np.float32
     assert clip_out.dtype == np.float32
@@ -414,7 +459,110 @@ def test_pipeline():
     assert orig_out.min() >= 0
     assert orig_out.max() <= 1
 
-    print('\n[COMPLETE] All assertions passed!')
+    print('\n[PASS] Test 1 passed!')
+
+    # Test 2: Small image (250x250 - should stay at original size, NO upscale)
+    print('\n--- Test 2: Small image (250x250) - should keep original size (NO upscale) ---')
+    test_img_small = np.random.randint(0, 255, (250, 250, 3), dtype=np.uint8)
+    pil_img_small = Image.fromarray(test_img_small)
+    buffer_small = io.BytesIO()
+    pil_img_small.save(buffer_small, format='JPEG', quality=90)
+    jpeg_bytes_small = buffer_small.getvalue()
+
+    # Affine matrix for 250x250 image
+    small_h, small_w = 250, 250
+    scale_small = min(YOLO_SIZE / small_h, YOLO_SIZE / small_w)
+    scale_small = min(scale_small, 1.0)
+    new_h_small = round(small_h * scale_small)
+    new_w_small = round(small_w * scale_small)
+    pad_x_small = (YOLO_SIZE - new_w_small) / 2.0
+    pad_y_small = (YOLO_SIZE - new_h_small) / 2.0
+    affine_matrix_small = np.array(
+        [[scale_small, 0.0, pad_x_small], [0.0, scale_small, pad_y_small]], dtype=np.float32
+    )
+
+    # Crop target size computed internally - just for display
+    expected_crop_target_small = compute_crop_target_size(small_w, small_h)
+    print(
+        f'    Expected crop target: {expected_crop_target_small} (min of {max(small_w, small_h)} and {CROP_IMAGE_MAX_SIZE})'
+    )
+
+    pipe2 = dual_preprocess_pipeline(batch_size=1, num_threads=2, device_id=0)
+    pipe2.build()
+    pipe2.feed_input('encoded_images', [np.frombuffer(jpeg_bytes_small, dtype=np.uint8)])
+    pipe2.feed_input('affine_matrices', [affine_matrix_small])
+    outputs_small = pipe2.run()
+
+    orig_out_small = np.array(outputs_small[2].as_cpu()[0])
+    print(f'    Input size: {small_h}x{small_w}')
+    print(f'    Output shape: {orig_out_small.shape} (expected: [3, {small_h}, {small_w}])')
+    print(f'    Memory: {orig_out_small.nbytes / 1024 / 1024:.2f} MB')
+
+    # Small image should stay at original size (NO upscale!)
+    assert orig_out_small.shape == (3, small_h, small_w), (
+        f'Small image was upscaled! Got {orig_out_small.shape}, expected (3, {small_h}, {small_w})'
+    )
+    print('[PASS] Test 2 passed - small image kept at original size (NO upscale)!')
+
+    # Test 3: Large image (2560x1920 - should be DOWNSCALED to 1920x1440)
+    print('\n--- Test 3: Large image (2560x1920) - should downscale to 1920x1440 (HD cap) ---')
+    # Note: 2560x1920 exceeds 1920px cap, so it should be resized
+    test_img_large = np.random.randint(0, 255, (1920, 2560, 3), dtype=np.uint8)
+    pil_img_large = Image.fromarray(test_img_large)
+    buffer_large = io.BytesIO()
+    pil_img_large.save(buffer_large, format='JPEG', quality=85)
+    jpeg_bytes_large = buffer_large.getvalue()
+
+    # Affine matrix for 2560x1920 image
+    large_h, large_w = 1920, 2560
+    scale_large = min(YOLO_SIZE / large_h, YOLO_SIZE / large_w)
+    scale_large = min(scale_large, 1.0)
+    new_h_large = round(large_h * scale_large)
+    new_w_large = round(large_w * scale_large)
+    pad_x_large = (YOLO_SIZE - new_w_large) / 2.0
+    pad_y_large = (YOLO_SIZE - new_h_large) / 2.0
+    affine_matrix_large = np.array(
+        [[scale_large, 0.0, pad_x_large], [0.0, scale_large, pad_y_large]], dtype=np.float32
+    )
+
+    # Crop target size computed internally - just for display
+    expected_crop_target_large = compute_crop_target_size(large_w, large_h)
+    print(
+        f'    Expected crop target: {expected_crop_target_large} (min of {max(large_w, large_h)} and {CROP_IMAGE_MAX_SIZE})'
+    )
+
+    pipe3 = dual_preprocess_pipeline(batch_size=1, num_threads=2, device_id=0)
+    pipe3.build()
+    pipe3.feed_input('encoded_images', [np.frombuffer(jpeg_bytes_large, dtype=np.uint8)])
+    pipe3.feed_input('affine_matrices', [affine_matrix_large])
+    outputs_large = pipe3.run()
+
+    orig_out_large = np.array(outputs_large[2].as_cpu()[0])
+
+    # Calculate expected downscaled size (cap at 1920px longest edge)
+    scale_factor = CROP_IMAGE_MAX_SIZE / max(large_h, large_w)
+    expected_crop_h = round(large_h * scale_factor)
+    expected_crop_w = round(large_w * scale_factor)
+
+    print(f'    Input size: {large_h}x{large_w}')
+    print(f'    Output shape: {orig_out_large.shape}')
+    print(
+        f'    Expected: [3, ~{expected_crop_h}, ~{expected_crop_w}] (HD cap at {CROP_IMAGE_MAX_SIZE}px)'
+    )
+    print(f'    Memory: {orig_out_large.nbytes / 1024 / 1024:.2f} MB')
+
+    # Large images should be downscaled to HD cap (max longest edge = 1920px)
+    assert orig_out_large.shape[1] <= CROP_IMAGE_MAX_SIZE + 1, (
+        f'Height {orig_out_large.shape[1]} exceeds max {CROP_IMAGE_MAX_SIZE}'
+    )
+    assert orig_out_large.shape[2] <= CROP_IMAGE_MAX_SIZE + 1, (
+        f'Width {orig_out_large.shape[2]} exceeds max {CROP_IMAGE_MAX_SIZE}'
+    )
+    print('[PASS] Test 3 passed - large image downscaled to HD cap!')
+
+    print('\n' + '=' * 80)
+    print('[COMPLETE] All pipeline tests passed!')
+    print('=' * 80)
     return True
 
 

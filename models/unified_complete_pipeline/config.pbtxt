@@ -1,0 +1,156 @@
+# Unified Complete Analysis Pipeline
+#
+# Complete GPU-accelerated pipeline combining all analysis capabilities:
+# - YOLO object detection
+# - MobileCLIP global and per-box embeddings
+# - Face detection (SCRFD on person crops OR YOLO11-face full image)
+# - ArcFace face embeddings
+# - PP-OCRv5 text detection and recognition
+#
+# Face Model Selection:
+# - "scrfd" (default): SCRFD face detection on person crops only (more efficient)
+# - "yolo11": YOLO11-face detection on full image (may detect more faces)
+#
+# Input: Raw JPEG bytes + affine matrix + optional face_model
+# Output: All detection, embedding, face, and OCR results
+
+name: "unified_complete_pipeline"
+backend: "python"
+max_batch_size: 1
+
+input [
+  {
+    name: "encoded_images"
+    data_type: TYPE_UINT8
+    dims: [ -1 ]
+  },
+  {
+    name: "affine_matrices"
+    data_type: TYPE_FP32
+    dims: [ 2, 3 ]
+  },
+  {
+    name: "face_model"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+    optional: true
+  }
+]
+
+output [
+  # Detection outputs
+  {
+    name: "num_dets"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "det_boxes"
+    data_type: TYPE_FP32
+    dims: [ 300, 4 ]
+  },
+  {
+    name: "det_scores"
+    data_type: TYPE_FP32
+    dims: [ 300 ]
+  },
+  {
+    name: "det_classes"
+    data_type: TYPE_INT32
+    dims: [ 300 ]
+  },
+  # Embedding outputs
+  {
+    name: "global_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 512 ]
+  },
+  {
+    name: "box_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 300, 512 ]
+  },
+  {
+    name: "normalized_boxes"
+    data_type: TYPE_FP32
+    dims: [ 300, 4 ]
+  },
+  # Face outputs
+  {
+    name: "num_faces"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "face_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 64, 512 ]
+  },
+  {
+    name: "face_boxes"
+    data_type: TYPE_FP32
+    dims: [ 64, 4 ]
+  },
+  {
+    name: "face_landmarks"
+    data_type: TYPE_FP32
+    dims: [ 64, 10 ]
+  },
+  {
+    name: "face_scores"
+    data_type: TYPE_FP32
+    dims: [ 64 ]
+  },
+  {
+    name: "face_person_idx"
+    data_type: TYPE_INT32
+    dims: [ 64 ]
+  },
+  # OCR outputs
+  {
+    name: "num_texts"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "text_boxes"
+    data_type: TYPE_FP32
+    dims: [ 128, 8 ]
+  },
+  {
+    name: "text_boxes_normalized"
+    data_type: TYPE_FP32
+    dims: [ 128, 4 ]
+  },
+  {
+    name: "texts"
+    data_type: TYPE_STRING
+    dims: [ 128 ]
+  },
+  {
+    name: "text_det_scores"
+    data_type: TYPE_FP32
+    dims: [ 128 ]
+  },
+  {
+    name: "text_rec_scores"
+    data_type: TYPE_FP32
+    dims: [ 128 ]
+  },
+  # Metadata
+  {
+    name: "face_model_used"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+  }
+]
+
+instance_group [
+  {
+    count: 2
+    kind: KIND_GPU
+    gpus: [0]
+  }
+]
+
+# No batching - process one image at a time for complete analysis

@@ -54,6 +54,7 @@ DEFAULT_SIMILARITY_THRESHOLD = 0.99
 @dataclass
 class DuplicateMatch:
     """A near-duplicate match result."""
+
     image_id: str
     image_path: str
     similarity: float
@@ -63,6 +64,7 @@ class DuplicateMatch:
 @dataclass
 class DuplicateGroup:
     """A group of near-duplicate images."""
+
     group_id: str
     primary_image_id: str
     primary_image_path: str
@@ -73,6 +75,7 @@ class DuplicateGroup:
 @dataclass
 class ScanStats:
     """Statistics from a duplicate scan operation."""
+
     total_images: int
     images_scanned: int
     groups_created: int
@@ -156,12 +159,14 @@ class DuplicateDetectionService:
                 continue
 
             source = hit['_source']
-            duplicates.append(DuplicateMatch(
-                image_id=hit_id,
-                image_path=source.get('image_path', ''),
-                similarity=similarity,
-                duplicate_group_id=source.get('duplicate_group_id'),
-            ))
+            duplicates.append(
+                DuplicateMatch(
+                    image_id=hit_id,
+                    image_path=source.get('image_path', ''),
+                    similarity=similarity,
+                    duplicate_group_id=source.get('duplicate_group_id'),
+                )
+            )
 
         return duplicates
 
@@ -216,12 +221,14 @@ class DuplicateDetectionService:
                 continue
 
             source = hit['_source']
-            duplicates.append(DuplicateMatch(
-                image_id=hit_id,
-                image_path=source.get('image_path', ''),
-                similarity=similarity,
-                duplicate_group_id=source.get('duplicate_group_id'),
-            ))
+            duplicates.append(
+                DuplicateMatch(
+                    image_id=hit_id,
+                    image_path=source.get('image_path', ''),
+                    similarity=similarity,
+                    duplicate_group_id=source.get('duplicate_group_id'),
+                )
+            )
 
         return duplicates
 
@@ -271,7 +278,9 @@ class DuplicateDetectionService:
                 },
             )
 
-        logger.info(f'Created duplicate group {group_id} with {len(duplicate_image_ids) + 1} images')
+        logger.info(
+            f'Created duplicate group {group_id} with {len(duplicate_image_ids) + 1} images'
+        )
         return group_id
 
     async def scan_and_group(
@@ -298,6 +307,7 @@ class DuplicateDetectionService:
             ScanStats with operation statistics
         """
         import time
+
         start_time = time.time()
 
         stats = ScanStats(
@@ -312,13 +322,7 @@ class DuplicateDetectionService:
         # Get count of ungrouped images
         count_response = await self.opensearch.client.count(
             index=IndexName.GLOBAL.value,
-            body={
-                'query': {
-                    'bool': {
-                        'must_not': {'exists': {'field': 'duplicate_group_id'}}
-                    }
-                }
-            },
+            body={'query': {'bool': {'must_not': {'exists': {'field': 'duplicate_group_id'}}}}},
         )
         stats.total_images = count_response['count']
 
@@ -334,11 +338,7 @@ class DuplicateDetectionService:
         response = await self.opensearch.client.search(
             index=IndexName.GLOBAL.value,
             body={
-                'query': {
-                    'bool': {
-                        'must_not': {'exists': {'field': 'duplicate_group_id'}}
-                    }
-                },
+                'query': {'bool': {'must_not': {'exists': {'field': 'duplicate_group_id'}}}},
                 '_source': ['image_id', 'image_path', 'global_embedding'],
                 'size': batch_size,
             },
@@ -374,7 +374,8 @@ class DuplicateDetectionService:
 
                     # Filter out already-grouped duplicates
                     ungrouped_dups = [
-                        d for d in duplicates
+                        d
+                        for d in duplicates
                         if d.duplicate_group_id is None and d.image_id not in processed_ids
                     ]
 
@@ -468,11 +469,11 @@ class DuplicateDetectionService:
                                             '_source': ['image_id', 'image_path'],
                                         }
                                     }
-                                }
+                                },
                             }
-                        }
+                        },
                     }
-                }
+                },
             },
         )
 
@@ -498,13 +499,15 @@ class DuplicateDetectionService:
                 primary_id = ''
                 primary_path = ''
 
-            groups.append(DuplicateGroup(
-                group_id=group_id,
-                primary_image_id=primary_id,
-                primary_image_path=primary_path,
-                member_count=count,
-                members=[],  # Lazy load members
-            ))
+            groups.append(
+                DuplicateGroup(
+                    group_id=group_id,
+                    primary_image_id=primary_id,
+                    primary_image_path=primary_path,
+                    member_count=count,
+                    members=[],  # Lazy load members
+                )
+            )
 
         return groups
 
@@ -539,9 +542,14 @@ class DuplicateDetectionService:
                 'size': 1000,
                 'query': query,
                 '_source': [
-                    'image_id', 'image_path', 'duplicate_group_id',
-                    'is_duplicate_primary', 'duplicate_score',
-                    'width', 'height', 'indexed_at',
+                    'image_id',
+                    'image_path',
+                    'duplicate_group_id',
+                    'is_duplicate_primary',
+                    'duplicate_score',
+                    'width',
+                    'height',
+                    'indexed_at',
                 ],
                 'sort': [
                     {'is_duplicate_primary': {'order': 'desc'}},
@@ -651,7 +659,9 @@ class DuplicateDetectionService:
         await self.opensearch.client.indices.refresh(index=IndexName.GLOBAL.value)
 
         merged_count = sum(len(await self.get_group_members(gid)) for gid in group_ids[1:])
-        logger.info(f'Merged {len(group_ids)} groups into {target_group_id}, added {merged_count} images')
+        logger.info(
+            f'Merged {len(group_ids)} groups into {target_group_id}, added {merged_count} images'
+        )
 
         return target_group_id
 
@@ -677,11 +687,7 @@ class DuplicateDetectionService:
             body={
                 'size': 0,
                 'query': {'exists': {'field': 'duplicate_group_id'}},
-                'aggs': {
-                    'group_count': {
-                        'cardinality': {'field': 'duplicate_group_id'}
-                    }
-                }
+                'aggs': {'group_count': {'cardinality': {'field': 'duplicate_group_id'}}},
             },
         )
 

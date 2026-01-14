@@ -497,6 +497,65 @@ class TritonClient:
 
         return results
 
+    def infer_track_e_batch_full(
+        self,
+        images_bytes: list[bytes],
+        max_workers: int = 64,
+    ) -> list[dict[str, Any]]:
+        """
+        Track E batch inference with full pipeline (YOLO + CLIP + per-box embeddings).
+
+        Optimized for large photo library ingestion:
+        - Submits ALL images to Triton simultaneously
+        - Triton's dynamic batcher groups them (16-48 avg batch size)
+        - Returns full pipeline results including box embeddings
+
+        Performance: 3-5x faster than sequential /ingest calls.
+        Target: 300+ RPS with batch sizes of 32-64.
+
+        Args:
+            images_bytes: List of raw JPEG/PNG bytes (max 64 images)
+            max_workers: Max parallel threads for Triton submission
+
+        Returns:
+            List of result dicts with detections, embeddings, and box data
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        batch_size = len(images_bytes)
+        if batch_size == 0:
+            return []
+
+        # Limit batch size
+        if batch_size > 64:
+            logger.warning(f'Batch size {batch_size} exceeds max 64, truncating')
+            images_bytes = images_bytes[:64]
+            batch_size = 64
+
+        results = [None] * batch_size
+
+        def process_single(idx: int, img_bytes: bytes) -> tuple[int, dict]:
+            """Process a single image with full pipeline."""
+            try:
+                result = self.infer_track_e(img_bytes, full_pipeline=True)
+                return idx, result
+            except Exception as e:
+                logger.error(f'Batch inference failed for image {idx}: {e}')
+                return idx, {'error': str(e), 'num_dets': 0}
+
+        # Submit ALL images in parallel - Triton will batch them
+        workers = min(max_workers, batch_size)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(process_single, i, img): i for i, img in enumerate(images_bytes)
+            }
+
+            for future in as_completed(futures):
+                idx, result = future.result()
+                results[idx] = result
+
+        return results
+
     # =========================================================================
     # Individual Model Inference (Track E Components)
     # =========================================================================
@@ -1041,6 +1100,586 @@ class TritonClient:
             'face_scores': face_scores_arr,
             'face_embeddings': face_embeddings,
             'face_person_idx': face_person_idx,
+            # Transform params
+            'orig_shape': (orig_h, orig_w),
+            'scale': scale,
+            'padding': padding,
+        }
+
+    # =========================================================================
+    # OCR: PP-OCRv5 Text Detection and Recognition
+    # =========================================================================
+
+    def infer_ocr(self, image_bytes: bytes) -> dict[str, Any]:
+        """
+        OCR inference: PP-OCRv5 text detection and recognition.
+
+        Pipeline:
+        1. Preprocess image (resize, normalize)
+        2. Call OCR pipeline BLS (detection + recognition)
+        3. Return text, boxes, and confidence scores
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+
+        Returns:
+            Dict with OCR results:
+            - num_texts: Number of text regions detected
+            - texts: List of detected text strings
+            - text_boxes: [N, 8] Quadrilateral boxes
+            - text_boxes_normalized: [N, 4] Axis-aligned boxes normalized
+            - text_scores: Detection confidence scores
+            - rec_scores: Recognition confidence scores
+        """
+        import cv2
+
+        # Decode image (handle RGBA by reading with alpha then converting)
+        img_array = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_UNCHANGED)
+        if img_array is None:
+            return {
+                'num_texts': 0,
+                'texts': [],
+                'text_boxes': np.array([]),
+                'text_boxes_normalized': np.array([]),
+                'text_scores': np.array([]),
+                'rec_scores': np.array([]),
+            }
+
+        # Handle different channel formats
+        if len(img_array.shape) == 2:
+            # Grayscale -> BGR
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+        elif img_array.shape[2] == 4:
+            # RGBA/BGRA -> BGR (composite alpha onto white background)
+            alpha = img_array[:, :, 3:4] / 255.0
+            rgb = img_array[:, :, :3]
+            white_bg = np.ones_like(rgb) * 255
+            img_array = (rgb * alpha + white_bg * (1 - alpha)).astype(np.uint8)
+
+        orig_h, orig_w = img_array.shape[:2]
+
+        # Preprocess for OCR detection
+        # PP-OCR approach: scale to fit within limit, pad to 32-boundary
+        # For small images (< 640px), upscale to ensure text is detectable
+        ocr_limit_side = 960
+        ocr_min_side = 640  # Minimum dimension for reliable text detection
+
+        # Calculate scaling ratio
+        max_side = max(orig_h, orig_w)
+        if max_side > ocr_limit_side:
+            # Downscale large images
+            ratio = ocr_limit_side / max_side
+        elif max_side < ocr_min_side:
+            # Upscale small images for better detection
+            # Use conservative upscaling (up to min_side, not limit_side)
+            ratio = ocr_min_side / max_side
+        else:
+            # Keep original size
+            ratio = 1.0
+
+        resize_h = int(orig_h * ratio)
+        resize_w = int(orig_w * ratio)
+
+        # Ensure minimum size
+        resize_h = max(32, resize_h)
+        resize_w = max(32, resize_w)
+
+        # Resize
+        resized = cv2.resize(img_array, (resize_w, resize_h), interpolation=cv2.INTER_LINEAR)
+
+        # Pad to 32-boundary
+        pad_h = (32 - resize_h % 32) % 32
+        pad_w = (32 - resize_w % 32) % 32
+        if pad_h > 0 or pad_w > 0:
+            padded = np.zeros((resize_h + pad_h, resize_w + pad_w, 3), dtype=np.uint8)
+            padded[:resize_h, :resize_w, :] = resized
+            resized = padded
+
+        # Normalize: (x / 127.5) - 1 for PP-OCR
+        ocr_input = resized.astype(np.float32) / 127.5 - 1.0
+
+        # HWC -> CHW (OpenCV reads as BGR, PP-OCR expects BGR)
+        ocr_input = ocr_input.transpose(2, 0, 1)
+
+        # Original image for cropping (normalize to [0, 1])
+        orig_normalized = img_array.astype(np.float32) / 255.0
+        orig_normalized = orig_normalized.transpose(2, 0, 1)
+
+        # Prepare inputs for ocr_pipeline (max_batch_size: 0, no batch dim)
+        inputs = [
+            InferInput('ocr_images', list(ocr_input.shape), 'FP32'),
+            InferInput('original_image', list(orig_normalized.shape), 'FP32'),
+            InferInput('orig_shape', [2], 'INT32'),
+        ]
+
+        inputs[0].set_data_from_numpy(ocr_input)
+        inputs[1].set_data_from_numpy(orig_normalized)
+        inputs[2].set_data_from_numpy(np.array([orig_h, orig_w], dtype=np.int32))
+
+        outputs = [
+            InferRequestedOutput('num_texts'),
+            InferRequestedOutput('text_boxes'),
+            InferRequestedOutput('text_boxes_normalized'),
+            InferRequestedOutput('texts'),
+            InferRequestedOutput('text_scores'),
+            InferRequestedOutput('rec_scores'),
+        ]
+
+        try:
+            response = self._infer_with_retry('ocr_pipeline', inputs, outputs)
+        except Exception as e:
+            logger.error(f'OCR inference failed: {e}')
+            return {
+                'num_texts': 0,
+                'texts': [],
+                'text_boxes': np.array([]),
+                'text_boxes_normalized': np.array([]),
+                'text_scores': np.array([]),
+                'rec_scores': np.array([]),
+            }
+
+        # Parse outputs
+        num_texts_raw = response.as_numpy('num_texts')
+        logger.info(
+            f'OCR response: num_texts_raw shape={num_texts_raw.shape}, value={num_texts_raw}'
+        )
+        num_texts = int(num_texts_raw[0])
+        text_boxes = response.as_numpy('text_boxes')[:num_texts]
+        text_boxes_norm = response.as_numpy('text_boxes_normalized')[:num_texts]
+        text_scores = response.as_numpy('text_scores')[:num_texts]
+        rec_scores = response.as_numpy('rec_scores')[:num_texts]
+
+        # Decode text strings (Triton returns bytes)
+        texts_raw = response.as_numpy('texts')[:num_texts]
+        texts = []
+        for t in texts_raw:
+            if isinstance(t, bytes):
+                texts.append(t.decode('utf-8', errors='ignore'))
+            elif isinstance(t, np.bytes_):
+                texts.append(str(t, 'utf-8', errors='ignore'))
+            else:
+                texts.append(str(t))
+
+        return {
+            'num_texts': num_texts,
+            'texts': texts,
+            'text_boxes': text_boxes,
+            'text_boxes_normalized': text_boxes_norm,
+            'text_scores': text_scores,
+            'rec_scores': rec_scores,
+            'image_width': orig_w,
+            'image_height': orig_h,
+        }
+
+    # =========================================================================
+    # Unified Complete Pipeline: Detection + Embeddings + Faces + OCR
+    # =========================================================================
+
+    def infer_unified_complete(
+        self, image_bytes: bytes, face_model: str = 'scrfd'
+    ) -> dict[str, Any]:
+        """
+        Unified complete analysis pipeline: YOLO + CLIP + Faces + OCR.
+
+        Single request that returns all analysis results from an image:
+        1. YOLO object detection
+        2. MobileCLIP global and per-box embeddings
+        3. Face detection + ArcFace embeddings (selectable model)
+        4. PP-OCRv5 text detection and recognition
+
+        Face Model Selection:
+        - "scrfd" (default): SCRFD on person crops only (more efficient)
+        - "yolo11": YOLO11-face on full image (may detect more faces)
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+            face_model: "scrfd" or "yolo11"
+
+        Returns:
+            Dict with all analysis results:
+            - Detection: num_dets, boxes, scores, classes
+            - Embeddings: global_embedding, box_embeddings, normalized_boxes
+            - Faces: num_faces, face_boxes, face_landmarks, face_scores, face_embeddings, face_person_idx
+            - OCR: num_texts, texts, text_boxes, text_det_scores, text_rec_scores
+            - Metadata: face_model_used, orig_shape
+        """
+        # Fast JPEG header parse for dimensions
+        orig_w, orig_h = get_jpeg_dimensions_fast(image_bytes)
+
+        # Get cached affine matrix
+        affine_matrix, scale, padding = calculate_affine_matrix(orig_w, orig_h, self.input_size)
+
+        # Prepare inputs
+        input_data = np.frombuffer(image_bytes, dtype=np.uint8)
+        input_data = np.expand_dims(input_data, axis=0)
+
+        inputs = [
+            InferInput('encoded_images', input_data.shape, 'UINT8'),
+            InferInput('affine_matrices', [1, 2, 3], 'FP32'),
+            InferInput('face_model', [1, 1], 'BYTES'),
+        ]
+        inputs[0].set_data_from_numpy(input_data)
+        inputs[1].set_data_from_numpy(np.expand_dims(affine_matrix, axis=0))
+        inputs[2].set_data_from_numpy(np.array([[face_model.encode('utf-8')]], dtype=object))
+
+        # Request all outputs
+        outputs = [
+            # Detection
+            InferRequestedOutput('num_dets'),
+            InferRequestedOutput('det_boxes'),
+            InferRequestedOutput('det_scores'),
+            InferRequestedOutput('det_classes'),
+            # Embeddings
+            InferRequestedOutput('global_embeddings'),
+            InferRequestedOutput('box_embeddings'),
+            InferRequestedOutput('normalized_boxes'),
+            # Faces
+            InferRequestedOutput('num_faces'),
+            InferRequestedOutput('face_embeddings'),
+            InferRequestedOutput('face_boxes'),
+            InferRequestedOutput('face_landmarks'),
+            InferRequestedOutput('face_scores'),
+            InferRequestedOutput('face_person_idx'),
+            # OCR
+            InferRequestedOutput('num_texts'),
+            InferRequestedOutput('text_boxes'),
+            InferRequestedOutput('text_boxes_normalized'),
+            InferRequestedOutput('texts'),
+            InferRequestedOutput('text_det_scores'),
+            InferRequestedOutput('text_rec_scores'),
+            # Metadata
+            InferRequestedOutput('face_model_used'),
+        ]
+
+        # Sync inference with retry
+        response = self._infer_with_retry('unified_complete_pipeline', inputs, outputs)
+
+        # Parse detection outputs (handle batch dimension variations)
+        num_dets_raw = response.as_numpy('num_dets')
+        num_dets = int(num_dets_raw.flatten()[0])
+
+        det_boxes_raw = response.as_numpy('det_boxes')
+        det_scores_raw = response.as_numpy('det_scores')
+        det_classes_raw = response.as_numpy('det_classes')
+
+        if det_boxes_raw.ndim == 3:
+            boxes = det_boxes_raw[0][:num_dets]
+            scores = det_scores_raw[0][:num_dets]
+            classes = det_classes_raw[0][:num_dets]
+        else:
+            boxes = det_boxes_raw[:num_dets]
+            scores = det_scores_raw[:num_dets]
+            classes = det_classes_raw[:num_dets]
+
+        # Parse embedding outputs
+        global_embedding_raw = response.as_numpy('global_embeddings')
+        if global_embedding_raw.ndim == 2:
+            global_embedding = global_embedding_raw[0]
+        else:
+            global_embedding = global_embedding_raw
+
+        box_embeddings_raw = response.as_numpy('box_embeddings')
+        normalized_boxes_raw = response.as_numpy('normalized_boxes')
+
+        if box_embeddings_raw.ndim == 3:
+            box_embeddings = box_embeddings_raw[0][:num_dets]
+            normalized_boxes = normalized_boxes_raw[0][:num_dets]
+        else:
+            box_embeddings = box_embeddings_raw[:num_dets]
+            normalized_boxes = normalized_boxes_raw[:num_dets]
+
+        # Parse face outputs
+        num_faces_arr = response.as_numpy('num_faces')
+        num_faces = int(num_faces_arr.flatten()[0])
+
+        face_boxes_raw = response.as_numpy('face_boxes')
+        face_landmarks_raw = response.as_numpy('face_landmarks')
+        face_scores_raw = response.as_numpy('face_scores')
+        face_person_idx_raw = response.as_numpy('face_person_idx')
+        face_emb_raw = response.as_numpy('face_embeddings')
+
+        if face_boxes_raw.ndim == 3:
+            face_boxes = face_boxes_raw[0][:num_faces]
+            face_landmarks = face_landmarks_raw[0][:num_faces]
+            face_scores_arr = face_scores_raw[0][:num_faces]
+            face_person_idx = face_person_idx_raw[0][:num_faces]
+            face_embeddings = face_emb_raw[0][:num_faces] if num_faces > 0 else np.array([])
+        else:
+            face_boxes = face_boxes_raw[:num_faces]
+            face_landmarks = face_landmarks_raw[:num_faces]
+            face_scores_arr = face_scores_raw[:num_faces]
+            face_person_idx = face_person_idx_raw[:num_faces]
+            face_embeddings = face_emb_raw[:num_faces] if num_faces > 0 else np.array([])
+
+        # Parse OCR outputs
+        num_texts_raw = response.as_numpy('num_texts')
+        num_texts = int(num_texts_raw.flatten()[0])
+        text_boxes_raw = response.as_numpy('text_boxes')
+        text_boxes_norm_raw = response.as_numpy('text_boxes_normalized')
+        texts_raw = response.as_numpy('texts')
+        text_det_scores_raw = response.as_numpy('text_det_scores')
+        text_rec_scores_raw = response.as_numpy('text_rec_scores')
+
+        if text_boxes_raw.ndim == 3:
+            text_boxes = text_boxes_raw[0][:num_texts]
+            text_boxes_norm = text_boxes_norm_raw[0][:num_texts]
+            text_det_scores = text_det_scores_raw[0][:num_texts]
+            text_rec_scores = text_rec_scores_raw[0][:num_texts]
+        else:
+            text_boxes = text_boxes_raw[:num_texts]
+            text_boxes_norm = text_boxes_norm_raw[:num_texts]
+            text_det_scores = text_det_scores_raw[:num_texts]
+            text_rec_scores = text_rec_scores_raw[:num_texts]
+
+        # Decode text strings
+        texts = []
+        if texts_raw.size > 0:
+            texts_flat = texts_raw.flatten()[:num_texts]
+            for t in texts_flat:
+                if isinstance(t, bytes):
+                    texts.append(t.decode('utf-8', errors='replace'))
+                else:
+                    texts.append(str(t))
+
+        # Parse metadata
+        face_model_used_raw = response.as_numpy('face_model_used')
+        if face_model_used_raw.size > 0:
+            fm = face_model_used_raw.flatten()[0]
+            if isinstance(fm, bytes):
+                face_model_used = fm.decode('utf-8')
+            else:
+                face_model_used = str(fm)
+        else:
+            face_model_used = face_model
+
+        return {
+            # Detection
+            'num_dets': num_dets,
+            'boxes': boxes,
+            'scores': scores,
+            'classes': classes,
+            # Embeddings
+            'global_embedding': global_embedding,
+            'box_embeddings': box_embeddings,
+            'normalized_boxes': normalized_boxes,
+            # Faces
+            'num_faces': num_faces,
+            'face_boxes': face_boxes,
+            'face_landmarks': face_landmarks,
+            'face_scores': face_scores_arr,
+            'face_embeddings': face_embeddings,
+            'face_person_idx': face_person_idx,
+            # OCR
+            'num_texts': num_texts,
+            'texts': texts,
+            'text_boxes': text_boxes,
+            'text_boxes_normalized': text_boxes_norm,
+            'text_det_scores': text_det_scores,
+            'text_rec_scores': text_rec_scores,
+            # Metadata
+            'face_model_used': face_model_used,
+            'orig_shape': (orig_h, orig_w),
+            'scale': scale,
+            'padding': padding,
+        }
+
+    # =========================================================================
+    # YOLO11-Face: Alternative Face Detection Pipeline
+    # =========================================================================
+
+    def infer_faces_yolo11(self, image_bytes: bytes, confidence: float = 0.5) -> dict[str, Any]:
+        """
+        Face detection and recognition using YOLO11-face + ArcFace.
+
+        Alternative to SCRFD-based face detection. Uses YOLO11-face which is a
+        single-stage pose-based face detector trained on face datasets.
+
+        Pipeline:
+        1. Decode and preprocess image for YOLO11-face (640x640)
+        2. Preserve HD original for face alignment cropping
+        3. Call yolo11_face_pipeline BLS model
+        4. Return face boxes, landmarks, and ArcFace embeddings
+
+        CRITICAL: Face alignment crops from HD ORIGINAL image, not detection input.
+        This is the industry standard for maximum recognition accuracy.
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+            confidence: Minimum detection confidence (filtered post-inference)
+
+        Returns:
+            Dict with:
+                - num_faces: Number of faces detected
+                - face_boxes: [N, 4] normalized boxes [x1, y1, x2, y2]
+                - face_landmarks: [N, 10] 5-point landmarks (pixel coords)
+                - face_scores: [N] detection confidence
+                - face_embeddings: [N, 512] ArcFace embeddings
+                - face_quality: [N] quality scores
+                - orig_shape: (height, width)
+        """
+        # Decode image to get original dimensions
+        img_array = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if img_array is None:
+            # Try PIL as fallback for unusual formats
+            pil_img = Image.open(io.BytesIO(image_bytes))
+            pil_img = pil_img.convert('RGB')
+            img_array = np.array(pil_img)[:, :, ::-1]  # RGB to BGR
+
+        orig_h, orig_w = img_array.shape[:2]
+
+        # Preprocess for YOLO11-face (640x640 letterbox)
+        letterbox = LetterBox(new_shape=(640, 640), auto=False, stride=32)
+        preprocessed = letterbox(image=img_array)
+
+        # Calculate letterbox affine matrix for inverse transformation
+        scale = min(640 / orig_h, 640 / orig_w)
+        new_w = orig_w * scale
+        new_h = orig_h * scale
+        pad_x = (640 - new_w) / 2
+        pad_y = (640 - new_h) / 2
+        affine_matrix = np.array([[scale, 0, pad_x], [0, scale, pad_y]], dtype=np.float32)
+
+        # Convert to CHW, normalize to [0, 1], float32
+        face_input = preprocessed.transpose(2, 0, 1).astype(np.float32) / 255.0
+
+        # Prepare HD original for cropping (CHW, float32, [0, 1])
+        # Convert BGR to RGB for consistency
+        orig_rgb = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
+        original_image = orig_rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
+
+        # Prepare inputs for yolo11_face_pipeline
+        inputs = [
+            InferInput('face_images', [1, 3, 640, 640], 'FP32'),
+            InferInput('original_image', [1, 3, orig_h, orig_w], 'FP32'),
+            InferInput('orig_shape', [1, 2], 'INT32'),
+            InferInput('affine_matrix', [1, 2, 3], 'FP32'),
+        ]
+        inputs[0].set_data_from_numpy(np.expand_dims(face_input, axis=0))
+        inputs[1].set_data_from_numpy(np.expand_dims(original_image, axis=0))
+        inputs[2].set_data_from_numpy(np.array([[orig_h, orig_w]], dtype=np.int32))
+        inputs[3].set_data_from_numpy(np.expand_dims(affine_matrix, axis=0))
+
+        outputs = [
+            InferRequestedOutput('num_faces'),
+            InferRequestedOutput('face_boxes'),
+            InferRequestedOutput('face_landmarks'),
+            InferRequestedOutput('face_scores'),
+            InferRequestedOutput('face_embeddings'),
+            InferRequestedOutput('face_quality'),
+        ]
+
+        # Sync inference with retry
+        response = self._infer_with_retry('yolo11_face_pipeline', inputs, outputs)
+
+        # Parse outputs
+        num_faces_arr = response.as_numpy('num_faces')
+        num_faces = int(num_faces_arr.flatten()[0])
+
+        face_boxes_raw = response.as_numpy('face_boxes')
+        face_landmarks_raw = response.as_numpy('face_landmarks')
+        face_scores_raw = response.as_numpy('face_scores')
+        face_embeddings_raw = response.as_numpy('face_embeddings')
+        face_quality_raw = response.as_numpy('face_quality')
+
+        # Handle batch dimension
+        if face_boxes_raw.ndim == 3:
+            face_boxes = face_boxes_raw[0][:num_faces]
+            face_landmarks = face_landmarks_raw[0][:num_faces]
+            face_scores = face_scores_raw[0][:num_faces]
+            face_embeddings = face_embeddings_raw[0][:num_faces] if num_faces > 0 else np.array([])
+            face_quality = face_quality_raw[0][:num_faces]
+        else:
+            face_boxes = face_boxes_raw[:num_faces]
+            face_landmarks = face_landmarks_raw[:num_faces]
+            face_scores = face_scores_raw[:num_faces]
+            face_embeddings = face_embeddings_raw[:num_faces] if num_faces > 0 else np.array([])
+            face_quality = face_quality_raw[:num_faces]
+
+        # Filter by confidence threshold (post-inference since pipeline doesn't accept it)
+        if confidence > 0 and num_faces > 0:
+            mask = face_scores >= confidence
+            face_boxes = face_boxes[mask]
+            face_landmarks = face_landmarks[mask]
+            face_scores = face_scores[mask]
+            face_embeddings = face_embeddings[mask] if len(face_embeddings) > 0 else face_embeddings
+            face_quality = face_quality[mask]
+            num_faces = len(face_scores)
+
+        return {
+            'num_faces': num_faces,
+            'face_boxes': face_boxes,
+            'face_landmarks': face_landmarks,
+            'face_scores': face_scores,
+            'face_embeddings': face_embeddings,
+            'face_quality': face_quality,
+            'orig_shape': (orig_h, orig_w),
+        }
+
+    def infer_faces_full_yolo11(
+        self, image_bytes: bytes, confidence: float = 0.5
+    ) -> dict[str, Any]:
+        """
+        Full pipeline with YOLO11-face: YOLO detection + MobileCLIP + YOLO11-face + ArcFace.
+
+        Combines Track E visual search capabilities with YOLO11-face detection:
+        1. YOLO object detection (parallel with 2, 3)
+        2. MobileCLIP global embedding (parallel with 1, 3)
+        3. YOLO11-face detection + ArcFace embeddings (parallel with 1, 2)
+
+        This is an alternative to infer_faces_full() which uses SCRFD for face detection.
+        YOLO11-face may detect more faces in challenging conditions (occlusion, pose).
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+            confidence: Minimum face detection confidence (default 0.5)
+
+        Returns:
+            Dict with:
+                - YOLO detections (num_dets, boxes, scores, classes)
+                - MobileCLIP global embedding (512-dim)
+                - Face detections (num_faces, face_boxes, face_landmarks, face_scores)
+                - Face ArcFace embeddings (128 x 512-dim)
+                - Face quality scores
+                - Transform params (orig_shape, scale, padding)
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Fast JPEG header parse for dimensions
+        orig_w, orig_h = get_jpeg_dimensions_fast(image_bytes)
+
+        # Get cached affine matrix
+        _affine_matrix, scale, padding = calculate_affine_matrix(orig_w, orig_h, self.input_size)
+
+        # Run Track E (YOLO + MobileCLIP) and YOLO11-face in parallel
+        def run_track_e():
+            return self.infer_track_e(image_bytes, full_pipeline=False)
+
+        def run_yolo11_face():
+            return self.infer_faces_yolo11(image_bytes, confidence=confidence)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            track_e_future = executor.submit(run_track_e)
+            face_future = executor.submit(run_yolo11_face)
+
+            track_e_result = track_e_future.result()
+            face_result = face_future.result()
+
+        # Combine results
+        return {
+            # YOLO detections from Track E
+            'num_dets': track_e_result['num_dets'],
+            'boxes': track_e_result['boxes'],
+            'scores': track_e_result['scores'],
+            'classes': track_e_result['classes'],
+            # MobileCLIP global embedding from Track E
+            'image_embedding': track_e_result['image_embedding'],
+            # Face detections from YOLO11-face pipeline
+            'num_faces': face_result['num_faces'],
+            'face_boxes': face_result['face_boxes'],
+            'face_landmarks': face_result['face_landmarks'],
+            'face_scores': face_result['face_scores'],
+            'face_embeddings': face_result['face_embeddings'],
+            'face_quality': face_result['face_quality'],
             # Transform params
             'orig_shape': (orig_h, orig_w),
             'scale': scale,

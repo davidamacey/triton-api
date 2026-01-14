@@ -568,7 +568,7 @@ class InferenceService:
             'orig_shape': (orig_h, orig_w),
         }
 
-    def infer_faces_full(self, image_bytes: bytes) -> dict[str, Any]:
+    def infer_faces_full(self, image_bytes: bytes, confidence: float = 0.5) -> dict[str, Any]:
         """
         Full unified pipeline: YOLO + SCRFD + MobileCLIP + ArcFace.
 
@@ -582,6 +582,7 @@ class InferenceService:
 
         Args:
             image_bytes: Raw JPEG/PNG bytes
+            confidence: Minimum face detection confidence (0.0-1.0)
 
         Returns:
             Dict with YOLO detections, faces, and all embeddings
@@ -594,14 +595,20 @@ class InferenceService:
 
         orig_h, orig_w = result['orig_shape']
 
-        # Format face detections
+        # Format face detections with confidence filtering
         # Note: face_pipeline already returns boxes normalized to [0,1]
         # and landmarks in pixel coordinates (need normalization)
         faces = []
+        filtered_embedding_indices = []
         for i in range(result['num_faces']):
+            score = float(result['face_scores'][i])
+
+            # Filter by confidence threshold
+            if score < confidence:
+                continue
+
             box = result['face_boxes'][i]
             landmarks = result['face_landmarks'][i]
-            score = float(result['face_scores'][i])
             quality = float(result['face_quality'][i]) if len(result['face_quality']) > i else None
 
             # Box is already normalized from face_pipeline
@@ -621,18 +628,23 @@ class InferenceService:
                     'quality': quality,
                 }
             )
+            filtered_embedding_indices.append(i)
 
-        # Format face embeddings
+        # Format face embeddings (only for faces passing confidence threshold)
         face_embeddings = []
-        if result['num_faces'] > 0 and len(result['face_embeddings']) > 0:
-            face_embeddings = result['face_embeddings'].tolist()
+        if len(filtered_embedding_indices) > 0 and len(result['face_embeddings']) > 0:
+            face_embeddings = [
+                result['face_embeddings'][idx].tolist()
+                for idx in filtered_embedding_indices
+                if idx < len(result['face_embeddings'])
+            ]
 
         return {
             # YOLO detections
             'detections': detections,
             'num_detections': len(detections),
-            # Face detections and embeddings
-            'num_faces': result['num_faces'],
+            # Face detections and embeddings (filtered by confidence)
+            'num_faces': len(faces),
             'faces': faces,
             'face_embeddings': face_embeddings,
             # Global embedding
@@ -751,3 +763,183 @@ class InferenceService:
             logger.info(f'Dynamic model detected: {original_name} -> Track B')
 
         return 'B', model_url, False
+
+    # =========================================================================
+    # YOLO11-Face: Alternative Face Detection Pipeline
+    # =========================================================================
+    def infer_faces_yolo11(self, image_bytes: bytes, confidence: float = 0.5) -> dict[str, Any]:
+        """
+        Face detection and recognition pipeline using YOLO11-face + ArcFace.
+
+        Alternative to SCRFD-based infer_faces(). Uses YOLO11-face which is a
+        pose-based face detector trained on face datasets.
+
+        Pipeline:
+        1. GPU JPEG decode (nvJPEG via DALI)
+        2. YOLO11-face detection with 5-point landmarks
+        3. GPU NMS (torchvision)
+        4. Face alignment from HD original (industry standard)
+        5. ArcFace embedding extraction
+
+        CRITICAL: Face alignment crops from the HD ORIGINAL image, not the
+        640x640 detection input. This preserves full resolution details for
+        maximum face recognition accuracy.
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+            confidence: Minimum detection confidence (default 0.5)
+
+        Returns:
+            Dict with face detections, landmarks, and ArcFace embeddings
+        """
+        client = get_triton_client(self.settings.triton_url)
+
+        try:
+            result = client.infer_faces_yolo11(image_bytes, confidence=confidence)
+        except Exception as e:
+            logger.error(f'YOLO11-face inference failed: {e}')
+            return {
+                'status': 'error',
+                'error': str(e),
+                'num_faces': 0,
+                'faces': [],
+                'embeddings': [],
+                'orig_shape': (0, 0),
+            }
+
+        orig_h, orig_w = result['orig_shape']
+
+        # Format face detections
+        # YOLO11-face pipeline returns boxes normalized to [0,1]
+        # and landmarks in pixel coordinates (need normalization)
+        faces = []
+        for i in range(result['num_faces']):
+            box = result['face_boxes'][i]
+            landmarks = result['face_landmarks'][i]
+            score = float(result['face_scores'][i])
+            quality = float(result['face_quality'][i]) if len(result['face_quality']) > i else None
+
+            # Box is already normalized from yolo11_face_pipeline
+            norm_box = [float(x) for x in box]
+
+            # Landmarks are in pixel coordinates - normalize to [0,1]
+            norm_landmarks = []
+            for j in range(0, 10, 2):
+                norm_landmarks.append(float(landmarks[j]) / orig_w)
+                norm_landmarks.append(float(landmarks[j + 1]) / orig_h)
+
+            faces.append(
+                {
+                    'box': norm_box,
+                    'landmarks': norm_landmarks,
+                    'score': score,
+                    'quality': quality,
+                }
+            )
+
+        # Format embeddings
+        embeddings = []
+        if result['num_faces'] > 0 and len(result['face_embeddings']) > 0:
+            embeddings = result['face_embeddings'].tolist()
+
+        return {
+            'status': 'success',
+            'num_faces': result['num_faces'],
+            'faces': faces,
+            'embeddings': embeddings,
+            'orig_shape': (orig_h, orig_w),
+        }
+
+    def infer_faces_full_yolo11(
+        self, image_bytes: bytes, confidence: float = 0.5
+    ) -> dict[str, Any]:
+        """
+        Full unified pipeline using YOLO11-face: YOLO + MobileCLIP + YOLO11-face + ArcFace.
+
+        Alternative to infer_faces_full() that uses YOLO11-face instead of SCRFD
+        for face detection. YOLO11-face is a pose-based detector that may perform
+        better with occluded or profile faces.
+
+        Pipeline (runs in parallel):
+        1. Track E: YOLO object detection + MobileCLIP global embedding
+        2. YOLO11-face: Face detection with 5-point landmarks + ArcFace embeddings
+
+        Args:
+            image_bytes: Raw JPEG/PNG bytes
+            confidence: Minimum face detection confidence (default 0.5)
+
+        Returns:
+            Dict with YOLO detections, faces, face_embeddings, and embedding_norm
+        """
+        client = get_triton_client(self.settings.triton_url)
+
+        try:
+            result = client.infer_faces_full_yolo11(image_bytes, confidence=confidence)
+        except Exception as e:
+            logger.error(f'YOLO11-face full inference failed: {e}')
+            return {
+                'status': 'error',
+                'error': str(e),
+                'detections': [],
+                'num_detections': 0,
+                'num_faces': 0,
+                'faces': [],
+                'face_embeddings': [],
+                'image_embedding': None,
+                'embedding_norm': 0.0,
+                'orig_shape': (0, 0),
+            }
+
+        # Format YOLO detections
+        detections = client.format_detections(result)
+
+        orig_h, orig_w = result['orig_shape']
+
+        # Format face detections
+        # YOLO11-face pipeline returns boxes normalized to [0,1]
+        # and landmarks in pixel coordinates (need normalization)
+        faces = []
+        for i in range(result['num_faces']):
+            box = result['face_boxes'][i]
+            landmarks = result['face_landmarks'][i]
+            score = float(result['face_scores'][i])
+            quality = float(result['face_quality'][i]) if len(result['face_quality']) > i else None
+
+            # Box is already normalized from yolo11_face_pipeline
+            norm_box = [float(x) for x in box]
+
+            # Landmarks are in pixel coordinates - normalize to [0,1]
+            norm_landmarks = []
+            for j in range(0, 10, 2):
+                norm_landmarks.append(float(landmarks[j]) / orig_w)
+                norm_landmarks.append(float(landmarks[j + 1]) / orig_h)
+
+            faces.append(
+                {
+                    'box': norm_box,
+                    'landmarks': norm_landmarks,
+                    'score': score,
+                    'quality': quality,
+                }
+            )
+
+        # Format face embeddings
+        face_embeddings = []
+        if result['num_faces'] > 0 and len(result['face_embeddings']) > 0:
+            face_embeddings = result['face_embeddings'].tolist()
+
+        return {
+            'status': 'success',
+            # YOLO detections
+            'detections': detections,
+            'num_detections': len(detections),
+            # Face detections and embeddings
+            'num_faces': result['num_faces'],
+            'faces': faces,
+            'face_embeddings': face_embeddings,
+            # Global embedding
+            'image_embedding': result['image_embedding'],
+            'embedding_norm': float(np.linalg.norm(result['image_embedding'])),
+            # Image metadata
+            'orig_shape': (orig_h, orig_w),
+        }

@@ -1,0 +1,43 @@
+# PP-OCRv5 Text Recognition Model (TensorRT)
+#
+# SVTR-LCNet architecture for text sequence recognition
+# Supports dynamic width for variable-length text recognition
+#
+# Input:
+#   - x: [B, 3, 48, W] FP32, preprocessed (x / 127.5 - 1), BGR
+#        Text crops with height=48, width=8-2048
+#
+# Output:
+#   - fetch_name_0: [B, T, 438] FP32, character probabilities
+#        T timesteps (dynamic), 438 character classes (English dict)
+
+name: "paddleocr_rec_trt"
+platform: "tensorrt_plan"
+max_batch_size: 1
+
+input [
+  {
+    name: "x"
+    data_type: TYPE_FP32
+    dims: [ 3, 48, -1 ]
+  }
+]
+
+output [
+  {
+    name: "fetch_name_0"
+    data_type: TYPE_FP32
+    dims: [ -1, 438 ]
+  }
+]
+
+instance_group [
+  {
+    count: 2
+    kind: KIND_GPU
+    gpus: [0]
+  }
+]
+
+# No dynamic batching - each request has different width
+# Process individually for best accuracy

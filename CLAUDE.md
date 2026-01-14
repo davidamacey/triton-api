@@ -49,10 +49,23 @@ The system uses Docker Compose to orchestrate services with a **unified API arch
 **Track E endpoints (DALI GPU preprocessing):**
 - `/track_e/predict` - YOLO + global embedding (single image)
 - `/track_e/predict_batch` - **Batch processing (up to 64 images per request)**
-- `/track_e/ingest` - Ingest images with embeddings
+- `/track_e/ingest` - Ingest images with embeddings (faces, OCR auto-indexed)
+- `/track_e/ingest_batch` - **High-throughput batch ingestion (300+ RPS)**
 - `/track_e/search/image` - Image-to-image similarity search
 - `/track_e/search/text` - Text-to-image search
 - `/track_e/search/object` - Object-level search
+- `/track_e/search/ocr` - Search images by text content (OCR)
+
+**Track E Face Detection/Recognition:**
+- `/track_e/faces/detect` - Face detection (YOLO11-face or SCRFD)
+- `/track_e/faces/recognize` - Face detection + ArcFace embeddings
+- `/track_e/faces/full` - Full pipeline (YOLO + faces + embeddings)
+- `/track_e/faces/search` - Face similarity search
+- `/track_e/faces/identify` - 1:N face identification
+
+**Track E OCR (PP-OCRv5):**
+- `/track_e/ocr/predict` - Extract text from image
+- `/track_e/ocr/predict_batch` - Batch OCR processing
 
 **Track F endpoints (CPU preprocessing):**
 - `/track_f/predict` - YOLO + global embedding (direct TRT, no DALI)
@@ -241,13 +254,26 @@ Results are auto-saved to `benchmarks/results/` with timestamps.
 - `POST /track_e/predict_full`: Detection + global + per-box embeddings
 - `POST /track_e/embed/image`: Image embedding only
 - `POST /track_e/embed/text`: Text embedding only
-- `POST /track_e/ingest`: Ingest image into OpenSearch index
+- `POST /track_e/ingest`: Ingest image into OpenSearch index (auto-indexes faces and OCR)
+- `POST /track_e/ingest_batch`: **Batch ingest up to 64 images (300+ RPS)**
 - `POST /track_e/search/image`: Image-to-image similarity search
 - `POST /track_e/search/text`: Text-to-image search
 - `POST /track_e/search/object`: Object-level search
+- `POST /track_e/search/ocr`: Search images by text content
 - `GET /track_e/index/stats`: Index statistics
 - `POST /track_e/index/create`: Create/recreate index
 - `DELETE /track_e/index`: Delete index
+
+**Track E - Face Detection/Recognition:**
+- `POST /track_e/faces/detect`: Face detection (YOLO11-face or SCRFD via `detector` param)
+- `POST /track_e/faces/recognize`: Face detection + ArcFace 512-dim embeddings
+- `POST /track_e/faces/full`: Full pipeline (YOLO + faces + global embedding)
+- `POST /track_e/faces/search`: Search for similar faces
+- `POST /track_e/faces/identify`: 1:N face identification
+
+**Track E - OCR (PP-OCRv5):**
+- `POST /track_e/ocr/predict`: Extract text + bounding boxes from image
+- `POST /track_e/ocr/predict_batch`: Batch OCR processing
 
 Supported models: "small" (nano and medium in development)
 

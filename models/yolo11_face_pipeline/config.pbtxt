@@ -1,0 +1,97 @@
+# YOLO11-face Pipeline (Python Backend)
+#
+# Complete face detection and recognition pipeline using YOLO11-face:
+# 1. YOLO11-face TensorRT for face detection with 5-point landmarks
+# 2. Landmark-based face alignment (Umeyama transform)
+# 3. ArcFace TensorRT for embedding extraction
+# 4. L2 normalization for cosine similarity
+#
+# CRITICAL: Face alignment crops from HD ORIGINAL image, not detection input.
+# This is the industry standard for maximum face recognition accuracy.
+#
+# Inputs:
+#   - face_images: [3, 640, 640] Preprocessed for YOLO11-face (normalized [0, 1])
+#   - original_image: [3, H, W] Full-resolution for face cropping
+#   - orig_shape: [2] Original image shape [H, W]
+#
+# Outputs:
+#   - num_faces: [1] Number of detected faces
+#   - face_boxes: [128, 4] Face boxes normalized [0, 1]
+#   - face_landmarks: [128, 10] 5-point landmarks (x1,y1,x2,y2,x3,y3,x4,y4,x5,y5)
+#   - face_scores: [128] Detection confidence
+#   - face_embeddings: [128, 512] L2-normalized ArcFace embeddings
+#   - face_quality: [128] Quality scores
+
+name: "yolo11_face_pipeline"
+backend: "python"
+max_batch_size: 64
+
+input [
+  {
+    name: "face_images"
+    data_type: TYPE_FP32
+    dims: [ 3, 640, 640 ]
+  },
+  {
+    name: "original_image"
+    data_type: TYPE_FP32
+    dims: [ 3, -1, -1 ]
+  },
+  {
+    name: "orig_shape"
+    data_type: TYPE_INT32
+    dims: [ 2 ]
+  },
+  {
+    name: "affine_matrix"
+    data_type: TYPE_FP32
+    dims: [ 2, 3 ]
+    optional: true
+  }
+]
+
+output [
+  {
+    name: "num_faces"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "face_boxes"
+    data_type: TYPE_FP32
+    dims: [ 128, 4 ]
+  },
+  {
+    name: "face_landmarks"
+    data_type: TYPE_FP32
+    dims: [ 128, 10 ]
+  },
+  {
+    name: "face_scores"
+    data_type: TYPE_FP32
+    dims: [ 128 ]
+  },
+  {
+    name: "face_embeddings"
+    data_type: TYPE_FP32
+    dims: [ 128, 512 ]
+  },
+  {
+    name: "face_quality"
+    data_type: TYPE_FP32
+    dims: [ 128 ]
+  }
+]
+
+instance_group [
+  {
+    count: 2
+    kind: KIND_GPU
+    gpus: [0]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 1, 2, 4, 8 ]
+  max_queue_delay_microseconds: 8000
+}

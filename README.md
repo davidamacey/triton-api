@@ -56,7 +56,11 @@ cd benchmarks
 
 **Track D has 3 variants**: streaming (low latency), balanced (general), batch (max throughput)
 
-**Track E**: Visual search with object detection, image/text embeddings, and similarity search via OpenSearch k-NN
+**Track E includes:**
+- Visual search with MobileCLIP embeddings + OpenSearch k-NN
+- Face detection (YOLO11-face or SCRFD) + ArcFace identity embeddings
+- OCR text extraction (PP-OCRv5) with trigram search
+- Batch ingestion endpoint (300+ RPS)
 
 ---
 
@@ -341,6 +345,28 @@ response = requests.get('http://localhost:4603/track_e/index/stats')
 response = requests.post('http://localhost:4603/track_e/index/create')
 response = requests.delete('http://localhost:4603/track_e/index')
 
+# Track E: Batch Ingestion (300+ RPS)
+files = [('files', open(f, 'rb')) for f in image_paths]
+response = requests.post('http://localhost:4603/track_e/ingest_batch', files=files)
+
+# Track E: Face Detection (YOLO11-face or SCRFD)
+response = requests.post('http://localhost:4603/track_e/faces/detect',
+                        files=files, params={'detector': 'yolo11'})
+
+# Track E: Face Recognition (detection + ArcFace embeddings)
+response = requests.post('http://localhost:4603/track_e/faces/recognize', files=files)
+
+# Track E: Face Search
+response = requests.post('http://localhost:4603/track_e/faces/search',
+                        files=files, params={'top_k': 10})
+
+# Track E: OCR Text Extraction
+response = requests.post('http://localhost:4603/track_e/ocr/predict', files=files)
+
+# Track E: Search by OCR Text
+response = requests.post('http://localhost:4603/track_e/search/ocr',
+                        json={'query': 'STOP', 'top_k': 10})
+
 print(response.json())
 ```
 
@@ -366,6 +392,30 @@ Response format (Track E search):
   ],
   "total_results": 10,
   "search_time_ms": 15.2
+}
+```
+
+Response format (Track E faces/detect):
+```json
+{
+  "num_faces": 2,
+  "faces": [
+    {"box": [0.1, 0.2, 0.3, 0.4], "confidence": 0.98, "landmarks": [...]}
+  ],
+  "detector": "yolo11",
+  "total_time_ms": 25.3
+}
+```
+
+Response format (Track E ocr/predict):
+```json
+{
+  "status": "success",
+  "num_texts": 3,
+  "texts": ["STOP", "ONE WAY", "EXIT"],
+  "boxes_normalized": [[0.1, 0.2, 0.3, 0.25], ...],
+  "det_scores": [0.95, 0.92, 0.89],
+  "rec_scores": [0.98, 0.95, 0.91]
 }
 ```
 
@@ -434,7 +484,12 @@ Response format (Track E search):
 
 This project uses code from the [levipereira/ultralytics](https://github.com/levipereira/ultralytics) fork for end2end YOLO export with GPU-accelerated NMS. This enables **Track C** (4x speedup) and **Track D** (10-15x speedup) by embedding TensorRT EfficientNMS into the model.
 
-**Track E** uses [Apple MobileCLIP](https://github.com/apple/ml-mobileclip) for visual embeddings and [OpenSearch](https://opensearch.org/) for k-NN vector similarity search.
+**Track E** uses:
+- [Apple MobileCLIP](https://github.com/apple/ml-mobileclip) for visual embeddings
+- [OpenSearch](https://opensearch.org/) for k-NN vector similarity search
+- [YOLO11-face](https://github.com/akanametov/yolo-face) for face detection (alternative to SCRFD)
+- [ArcFace](https://github.com/deepinsight/insightface) for face identity embeddings
+- [PP-OCRv5](https://github.com/PaddlePaddle/PaddleOCR) for text detection and recognition
 
 See [ATTRIBUTION.md](ATTRIBUTION.md) for complete third-party code attribution and licensing information.
 

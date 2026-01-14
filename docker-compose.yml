@@ -35,7 +35,7 @@ services:
       - --load-model=yolo_clip_ensemble                # Track E basic (detection + global embed)
       - --load-model=yolo_mobileclip_ensemble          # Track E full (+ per-box embeddings)
       #
-      # Track E Face Detection & Recognition
+      # Track E Face Detection & Recognition (SCRFD)
       - --load-model=quad_preprocess_dali             # Quad-branch DALI (YOLO + CLIP + SCRFD + HD)
       - --load-model=scrfd_10g_face_detect            # Face detection (TensorRT)
       - --load-model=arcface_w600k_r50                # Face recognition (TensorRT)
@@ -43,6 +43,18 @@ services:
       - --load-model=yolo_face_clip_ensemble          # Unified ensemble (YOLO + CLIP + SCRFD + ArcFace)
       - --load-model=unified_embedding_extractor      # Unified extractor (box + face)
       - --load-model=yolo_unified_ensemble            # Efficient pipeline (face detection on person crops only)
+      #
+      # Track E Face Detection & Recognition (YOLO11-Face End2End - full batching)
+      - --load-model=yolo11_face_small_trt_end2end    # YOLO11-face TensorRT + GPU NMS (batching, max=64)
+      - --load-model=yolo11_face_pipeline             # YOLO11-face pipeline (Python backend)
+      #
+      # Track E OCR: PP-OCRv5 Text Detection & Recognition
+      - --load-model=paddleocr_det_trt                # Text detection (TensorRT, dynamic H/W)
+      - --load-model=paddleocr_rec_trt                # Text recognition (TensorRT, dynamic width 8-2048)
+      - --load-model=ocr_pipeline                     # OCR pipeline (Python BLS orchestrator)
+      #
+      # Unified Complete Pipeline: All-in-one analysis
+      - --load-model=unified_complete_pipeline        # Complete pipeline (YOLO + CLIP + faces + OCR)
       # ===================================================================
       - --log-verbose=1
       - --log-info=true

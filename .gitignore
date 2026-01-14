@@ -58,6 +58,9 @@ locust_*.csv
 # Clustering test output (mosaics, visualizations)
 cluster_test_output/
 
+# Test results (generated during testing)
+test_results/
+
 # Pipeline output (mosaics, clusters, visualizations)
 outputs/
 

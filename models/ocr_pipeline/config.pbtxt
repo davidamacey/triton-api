@@ -1,0 +1,92 @@
+# PP-OCRv5 Text Detection & Recognition Pipeline (Python BLS)
+#
+# Complete OCR pipeline that:
+# 1. Receives preprocessed image from DALI
+# 2. Calls PP-OCRv5 detection TensorRT
+# 3. Post-processes detection (DBPostProcess)
+# 4. Sorts boxes in reading order
+# 5. Crops text regions with perspective transform
+# 6. Calls PP-OCRv5 recognition TensorRT
+# 7. Decodes text with CTC
+#
+# Inputs:
+#   - ocr_images: [3, H, W] FP32, normalized [-1, 1] from DALI
+#   - original_image: [3, H, W] FP32, normalized [0, 1] for cropping
+#   - orig_shape: [2] INT32, original image [H, W]
+#
+# Outputs:
+#   - num_texts: [1] INT32, number of detected text regions
+#   - text_boxes: [128, 8] FP32, quadrilateral boxes (x1,y1,x2,y2,x3,y3,x4,y4)
+#   - text_boxes_normalized: [128, 4] FP32, axis-aligned boxes [x1,y1,x2,y2] normalized
+#   - texts: [128] BYTES, detected text strings
+#   - text_scores: [128] FP32, detection confidence scores
+#   - rec_scores: [128] FP32, recognition confidence scores
+
+name: "ocr_pipeline"
+backend: "python"
+max_batch_size: 0  # Dynamic batching handled manually
+
+input [
+  {
+    name: "ocr_images"
+    data_type: TYPE_FP32
+    dims: [ 3, -1, -1 ]  # [3, H, W] variable size, max 960
+  },
+  {
+    name: "original_image"
+    data_type: TYPE_FP32
+    dims: [ 3, -1, -1 ]  # [3, H, W] full resolution image
+  },
+  {
+    name: "orig_shape"
+    data_type: TYPE_INT32
+    dims: [ 2 ]  # [H, W]
+  }
+]
+
+output [
+  {
+    name: "num_texts"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "text_boxes"
+    data_type: TYPE_FP32
+    dims: [ 128, 8 ]  # [max_texts, 8 coords]
+  },
+  {
+    name: "text_boxes_normalized"
+    data_type: TYPE_FP32
+    dims: [ 128, 4 ]  # [max_texts, x1y1x2y2]
+  },
+  {
+    name: "texts"
+    data_type: TYPE_STRING
+    dims: [ 128 ]  # [max_texts]
+  },
+  {
+    name: "text_scores"
+    data_type: TYPE_FP32
+    dims: [ 128 ]  # Detection scores
+  },
+  {
+    name: "rec_scores"
+    data_type: TYPE_FP32
+    dims: [ 128 ]  # Recognition scores
+  }
+]
+
+instance_group [
+  {
+    count: 2
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+# Model dependencies (BLS)
+parameters: {
+  key: "FORCE_CPU_ONLY_INPUT_TENSORS"
+  value: { string_value: "no" }
+}

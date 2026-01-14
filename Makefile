@@ -968,6 +968,117 @@ test-track-e-faces: ## Test face detection and recognition in Triton
 	@$(COMPOSE) exec $(API_SERVICE) python -c "import numpy as np; import tritonclient.grpc as grpcclient; client = grpcclient.InferenceServerClient('triton-api:8001'); print('Testing SCRFD...'); inputs = [grpcclient.InferInput('input.1', [1, 3, 640, 640], 'FP32')]; inputs[0].set_data_from_numpy(np.random.rand(1, 3, 640, 640).astype(np.float32)); result = client.infer('scrfd_10g_face_detect', inputs); print('  SCRFD outputs:', [o.name for o in result.get_response().outputs]); print('Testing ArcFace...'); inputs = [grpcclient.InferInput('input.1', [1, 3, 112, 112], 'FP32')]; inputs[0].set_data_from_numpy(np.random.rand(1, 3, 112, 112).astype(np.float32)); result = client.infer('arcface_w600k_r50', inputs); print('  ArcFace embedding shape:', result.as_numpy('683').shape); print('Face models working!')"
 
 # ==================================================================================
+# YOLO11-Face (Alternative Face Detection Pipeline)
+# ==================================================================================
+
+.PHONY: download-yolo11-face
+download-yolo11-face: ## Download YOLO11-face models from YapaLab/yolo-face
+	@echo "Downloading YOLO11-face models..."
+	$(COMPOSE) exec $(API_SERVICE) python /app/scripts/download_yolo11_face.py --models small
+
+.PHONY: export-yolo11-face
+export-yolo11-face: ## Export YOLO11-face to TensorRT
+	@echo "Exporting YOLO11-face to TensorRT..."
+	$(COMPOSE) exec $(API_SERVICE) python /app/export/export_yolo11_face.py \
+		--model /app/pytorch_models/yolo11_face/yolov11s-face.pt
+
+.PHONY: load-yolo11-face
+load-yolo11-face: ## Load YOLO11-face models into Triton
+	@echo "Loading YOLO11-face models into Triton..."
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/yolo11_face_small_trt/load" || true
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/yolo11_face_pipeline/load" || true
+	@echo "YOLO11-face models loaded."
+
+.PHONY: setup-yolo11-face
+setup-yolo11-face: download-yolo11-face export-yolo11-face restart-triton load-yolo11-face ## Complete YOLO11-face setup
+	@echo "YOLO11-face setup complete!"
+	@echo ""
+	@echo "Test with:"
+	@echo "  curl -X POST http://localhost:$(API_PORT)/track_e/faces/yolo11/detect -F 'file=@test.jpg'"
+
+.PHONY: test-yolo11-face
+test-yolo11-face: ## Test YOLO11-face face detection
+	@echo "Testing YOLO11-face detection..."
+	@curl -s -X POST http://localhost:$(API_PORT)/track_e/faces/yolo11/detect \
+		-F "file=@test_images/bus.jpg" | jq '.'
+
+.PHONY: test-yolo11-face-recognize
+test-yolo11-face-recognize: ## Test YOLO11-face with ArcFace recognition
+	@echo "Testing YOLO11-face + ArcFace recognition..."
+	@curl -s -X POST http://localhost:$(API_PORT)/track_e/faces/yolo11/recognize \
+		-F "file=@test_images/bus.jpg" | jq '.'
+
+.PHONY: benchmark-face-detectors
+benchmark-face-detectors: ## Benchmark YOLO11-face vs SCRFD
+	@echo "Benchmarking face detectors (YOLO11-face vs SCRFD)..."
+	@curl -s -X POST "http://localhost:$(API_PORT)/track_e/faces/yolo11/benchmark?iterations=20" \
+		-F "file=@test_images/bus.jpg" | jq '.'
+
+# ==================================================================================
+# OCR (PP-OCRv5) - Track E Extension
+# ==================================================================================
+
+.PHONY: download-paddleocr
+download-paddleocr: ## Download PP-OCRv5 ONNX models and dictionaries
+	@echo "Downloading PP-OCRv5 models..."
+	$(COMPOSE) exec $(API_SERVICE) python /app/export/download_paddleocr.py
+
+.PHONY: export-paddleocr-det
+export-paddleocr-det: ## Export PaddleOCR detection model to TensorRT
+	@echo "Exporting PP-OCRv5 detection to TensorRT..."
+	$(COMPOSE) exec $(API_SERVICE) python /app/export/export_paddleocr_det.py
+
+.PHONY: export-paddleocr-rec
+export-paddleocr-rec: ## Export PaddleOCR recognition model to TensorRT
+	@echo "Exporting PP-OCRv5 recognition to TensorRT..."
+	$(COMPOSE) exec $(API_SERVICE) python /app/export/export_paddleocr_rec.py
+
+.PHONY: export-paddleocr
+export-paddleocr: export-paddleocr-det export-paddleocr-rec ## Export both PaddleOCR models to TensorRT
+	@echo "Both OCR models exported!"
+
+.PHONY: create-dali-penta
+create-dali-penta: ## Create penta-branch DALI pipeline (YOLO + CLIP + SCRFD + HD + OCR)
+	@echo "Creating penta-branch DALI pipeline..."
+	@echo "Outputs: yolo_images, clip_images, face_images, original_images, ocr_images"
+	$(COMPOSE) exec $(API_SERVICE) bash -c "cd /app && PYTHONPATH=/app python dali/create_penta_dali_pipeline.py"
+	@$(MAKE) restart-triton
+
+.PHONY: setup-ocr
+setup-ocr: download-paddleocr export-paddleocr create-dali-penta ## Complete OCR pipeline setup
+	@echo "OCR pipeline setup complete!"
+	@echo ""
+	@echo "Testing OCR..."
+	@$(MAKE) test-ocr
+
+.PHONY: test-ocr
+test-ocr: ## Test OCR pipeline
+	@echo "Testing OCR pipeline..."
+	@curl -s -X POST http://localhost:$(API_PORT)/track_e/ocr/predict \
+		-F "image=@test_images/bus.jpg" | jq '.'
+
+.PHONY: test-ocr-batch
+test-ocr-batch: ## Test OCR batch processing
+	@echo "Testing OCR batch processing..."
+	@curl -s -X POST http://localhost:$(API_PORT)/track_e/ocr/predict_batch \
+		-H "Content-Type: application/json" \
+		-d '{"images": ["'"$$(base64 -w0 test_images/bus.jpg)"'"]}' | jq '.'
+
+.PHONY: test-ocr-search
+test-ocr-search: ## Test OCR text search
+	@echo "Testing OCR text search..."
+	@curl -s -X POST "http://localhost:$(API_PORT)/track_e/search/ocr?query=bus&top_k=5" | jq '.'
+
+.PHONY: load-ocr-models
+load-ocr-models: ## Load OCR models into Triton
+	@echo "Loading OCR models into Triton..."
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/paddleocr_det_trt/load" || true
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/paddleocr_rec_trt/load" || true
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/ocr_pipeline/load" || true
+	@curl -s -X POST "http://localhost:$(TRITON_HTTP_PORT)/v2/repository/models/penta_preprocess_dali/load" || true
+	@echo "OCR models loaded."
+
+# ==================================================================================
 # Monitoring and Metrics
 # ==================================================================================
 
